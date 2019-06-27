@@ -498,8 +498,25 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		
 		ROS_INFO_STREAM("[ICP] Computing - reading: " << newPointCloud->getNbPoints() << ", reference: " << icp.getInternalMap().getNbPoints() );
 
+
+
+        //TODO: VK: This piece of code disables penalties to test and develop gravity compensation
+        PM::Matrix test_att(T_odom_to_scanner.inverse());
+        test_att(3,3) = nan("");
+
+        PM::Matrix test_att_w = PM::TransformationParameters::Identity(dimp1-1, dimp1-1)*1000;
+
+
+        PM::ErrorMinimizer::Penalty pure_gravity_penalty = std::make_tuple(test_att,
+                                                                           test_att_w,
+                                                                           test_att);
+        PM::ErrorMinimizer::Penalties penalties = {};
+        penalties.push_back(pure_gravity_penalty);
+        //TODO: VK End of 4dof hack
+
+
 		icpMapLock.lock();
-		T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap);
+		T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap, penalties);
 		icpMapLock.unlock();
 
 		T_updatedScanner_to_map = T_localMap_to_map * T_updatedScanner_to_localMap;
@@ -670,8 +687,15 @@ void Mapper::updateIcpMap(const DP* newMapPointCloud)
 		//				time_current
 		//				), mapPointCloud->getHomogeneousDim());
 
+		// VK: This sets the CutMap in the frame of laser, including its orientation
 		// Move the global map to the scanner pose
-		const PM::TransformationParameters T_scanner_to_map = this->T_odom_to_map * T_odom_to_scanner.inverse();
+		//const PM::TransformationParameters T_scanner_to_map = this->T_odom_to_map * T_odom_to_scanner.inverse();
+
+        // VK: THis way, the cutmap keeps the same orientation as the big map. Necessary for the explicit gravity penalty...
+        PM::TransformationParameters T_scanner_to_map = this->T_odom_to_map * T_odom_to_scanner.inverse();
+        T_scanner_to_map.block(0,0,3,3) = PM::TransformationParameters::Identity(3,3); //VK: This line was added
+        // VK: End of hack
+
 		DP localMap = transformation->compute(*newMapPointCloud, T_scanner_to_map.inverse());
 
 		// Cut points in a radius of the parameter sensorMaxRange
