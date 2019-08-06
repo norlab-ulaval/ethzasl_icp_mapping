@@ -516,7 +516,8 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 
 		icpMapLock.lock();
-		T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap, penalties);
+		//T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap, penalties);
+        T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap);
 		icpMapLock.unlock();
 
 		T_updatedScanner_to_map = T_localMap_to_map * T_updatedScanner_to_localMap;
