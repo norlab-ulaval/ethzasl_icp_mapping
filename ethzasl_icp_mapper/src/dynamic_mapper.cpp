@@ -501,17 +501,17 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 
         //TODO: VK: This piece of code disables penalties to test and develop gravity compensation
-        PM::Matrix test_att(T_odom_to_scanner.inverse());
-        test_att(3,3) = nan("");
+        //PM::Matrix test_att(T_odom_to_scanner.inverse());
+        //test_att(3,3) = nan("");
 
-        PM::Matrix test_att_w = PM::TransformationParameters::Identity(dimp1-1, dimp1-1)*1000;
+        //PM::Matrix test_att_w = PM::TransformationParameters::Identity(dimp1-1, dimp1-1)*1000;
 
 
-        PM::ErrorMinimizer::Penalty pure_gravity_penalty = std::make_tuple(test_att,
-                                                                           test_att_w,
-                                                                           test_att);
-        PM::ErrorMinimizer::Penalties penalties = {};
-        penalties.push_back(pure_gravity_penalty);
+        //PM::ErrorMinimizer::Penalty pure_gravity_penalty = std::make_tuple(test_att,
+        //                                                                   test_att_w,
+        //                                                                   test_att);
+        //PM::ErrorMinimizer::Penalties penalties = {};
+        //penalties.push_back(pure_gravity_penalty);
         //TODO: VK End of 4dof hack
 
 
