@@ -23,6 +23,7 @@
 #include "tf_conversions/tf_eigen.h"
 #include "tf/transform_listener.h"
 #include "eigen_conversions/eigen_msg.h"
+#include "visualization_msgs/Marker.h"
 
 // Services
 #include "std_msgs/String.h"
@@ -62,6 +63,8 @@ class Mapper
 	ros::Publisher outlierPub;
 	ros::Publisher odomPub;
 	ros::Publisher odomErrorPub;
+    ros::Publisher penaltyVisMarkerPub; //VK: for seeing what is going on
+    ros::Publisher penaltyCutMapVisMarkerPub; //VK: for seeing what is going on
 	
 	// Services
 	ros::ServiceServer getPointMapSrv;
@@ -116,6 +119,12 @@ class Mapper
 	string mapFrame;
 	string vtkFinalMapName; //!< name of the final vtk map
 
+	// VK: Penalty parameters
+    double rotPenaltyLength;
+    double grav_penalty_length;
+    double penaltyFactor;
+    double accPenaltyFactor;
+
 	const double mapElevation; // initial correction on z-axis //FIXME: handle the full matrix
 	
 	// Parameters for dynamic filtering
@@ -163,6 +172,22 @@ protected:
 	void publishLoop(double publishPeriod);
 	void publishTransform();
 	void loadExternalParameters();
+
+    void publishPenaltyMarkerInMapFrame(nav_msgs::Odometry& location,
+                                        nav_msgs::Odometry& gravity,
+                                        nav_msgs::Odometry& yaw,
+                                        float red,
+                                        float green,
+                                        float blue);
+    int marker_id_counter;
+    void publishPenaltyMarkerInCutMapFrame(nav_msgs::Odometry& location,
+                                           nav_msgs::Odometry& gravity,
+                                           nav_msgs::Odometry& yaw,
+                                           float red,
+                                           float green,
+                                           float blue,
+                                           int id1,
+                                           int id2);
 	
 	// Services
 	bool getPointMap(map_msgs::GetPointMap::Request &req, map_msgs::GetPointMap::Response &res);
@@ -216,7 +241,12 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	T_odom_to_scanner(PM::TransformationParameters::Identity(4, 4)),
 	publishStamp(ros::Time::now()),
 	tfListener(ros::Duration(30)),
-	eps(0.0001)
+	eps(0.0001),
+	//VK: Penalty stuff params below
+    rotPenaltyLength(getParam<double>("rotPenaltyLength", 1)),
+    grav_penalty_length(getParam<double>("grav_penalty_length", 0)),
+    penaltyFactor(getParam<double>("penaltyFactor", 1)),
+    accPenaltyFactor(getParam<double>("accPenaltyFactor", 0))
 {
 
 
@@ -250,7 +280,11 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	outlierPub = n.advertise<sensor_msgs::PointCloud2>("outliers", 2, true);
 	odomPub = n.advertise<nav_msgs::Odometry>("icp_odom", 50, true);
 	odomErrorPub = n.advertise<nav_msgs::Odometry>("icp_error_odom", 50, true);
-	
+
+	//VK: The penalty visualisation
+    penaltyVisMarkerPub = n.advertise<visualization_msgs::Marker>( "penalty_visualization_marker", 5 );
+    penaltyCutMapVisMarkerPub = n.advertise<visualization_msgs::Marker>( "penalty_cutMap_visualization_marker", 5 );
+
 	// service initializations
 	getPointMapSrv = n.advertiseService("dynamic_point_map", &Mapper::getPointMap, this);
 	saveMapSrv = pn.advertiseService("save_map", &Mapper::saveMap, this);
@@ -492,6 +526,55 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	
 	try 
 	{
+	    // VK: This block of code was taken from the branch "Vlads_getting_to_know_the_stuff"(follower of "skidoo_exp") of the dense_icp_mapper
+	    // It sets up penalty points, given the prior contans translation from GPS and orientation from IMU
+
+        // Find the location of the central penalty point
+        PM::Matrix central_penalty_point_in_world = T_odom_to_scanner.inverse();
+        central_penalty_point_in_world.block(0, 0, dimp1-1, dimp1-1) = PM::TransformationParameters::Identity(dimp1-1, dimp1-1);
+
+        // Find the location of the acceleration penalty point
+        PM::TransformationParameters tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
+        tmp(0, 3) = 0.0;
+        tmp(1, 3) = 0.0;
+        tmp(2, 3) = -grav_penalty_length;
+
+        // VK: This was not correct, it should be location(in full map, not cut) + offset down
+        //const PM::TransformationParameters gravity_penalty_point_in_world = tmp * T_gps_to_scanner_no_rot *  T_gps_link_to_gps * correction.inverse() * T_world_to_gps_link;
+        // VK: As shown below:
+        const PM::TransformationParameters gravity_penalty_point_in_world = tmp * central_penalty_point_in_world;
+
+
+        // Find the location of the yaw penalty point
+        tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
+        tmp(0, 3) = rotPenaltyLength;   // tmp points in the x axis direction of the sensor - Warthog
+        //tmp(0, 3) = -rotPenaltyLength;   // tmp points in the -x axis direction of the sensor - Skidoo
+        tmp(1, 3) = 0.0;
+        tmp(2, 3) = 0.0;
+
+
+        //VK: The next line was in the dense mapper implementation for skidoo. The T_gps_to_scanner transform was fetched in the runtime, but it is a constant.
+        // (Sort of). It should be ideally expressed in a "stabilized base link" frame, a one which is parallel with horizon, but rotates with yaw.
+        // I am not doing that.
+        // For the main laser on warthog, the rotation is identity as long as the robot is not inclined much...
+        // TODO: If we switch to an inclined sensor, this has to be fixed accordingly
+        //PM::TransformationParameters rotation_from_scanner_to_gps = T_gps_to_scanner;
+        PM::TransformationParameters rotation_from_scanner_to_gps = PM::TransformationParameters::Identity(dimp1, dimp1);
+        rotation_from_scanner_to_gps(0,3)=0.0;
+        rotation_from_scanner_to_gps(1,3)=0.0;
+        rotation_from_scanner_to_gps(2,3)=0.0;
+        // TODO: VK: This should be location (in full map) + offset forward (in direction of yaw), ideally
+        // The next line takes a point lying on the x axis of the scanner, rotates by the angle between scanner and GPS (VERY SKIDOOO SPECIFIC...)
+        // and finally transforms it to the world frame
+        PM::TransformationParameters yaw_penalty_point_in_world = T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;
+        yaw_penalty_point_in_world.block(0, 0, dimp1-1, dimp1-1) = PM::TransformationParameters::Identity(dimp1-1, dimp1-1);
+        // The next line simply projects the point to the xy world plane by setting the z coordinate equal to the z component of the central point
+        yaw_penalty_point_in_world(2,3) = central_penalty_point_in_world(2,3);
+
+        //VK: Now ends the block with preparation for the penalties, the next part has to construct the penalties
+
+
+
 		// Apply ICP
 		PM::TransformationParameters T_updatedScanner_to_map;
 		PM::TransformationParameters T_updatedScanner_to_localMap;
@@ -500,24 +583,86 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 
 
-        //TODO: VK: This piece of code disables penalties to test and develop gravity compensation
-        //PM::Matrix test_att(T_odom_to_scanner.inverse());
-        //test_att(3,3) = nan("");
+        // VK: This part actually contructs the penalty objects
 
-        //PM::Matrix test_att_w = PM::TransformationParameters::Identity(dimp1-1, dimp1-1)*1000;
+        // VK: This block creates the central penalty point penalty
+        PM::Matrix central_penalty_point_in_cutMap = T_localMap_to_map.inverse() * central_penalty_point_in_world; // Remove the tf between map and odom
+        PM::Matrix cov(dimp1-1, dimp1-1);
+
+        cov     << 0.5 * penaltyFactor,   0,   0,
+                0, 0.5 * penaltyFactor,   0,
+                0,   0, 0.5 * penaltyFactor;
+
+        PM::Matrix central_penalty_point_in_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
+        PM::ErrorMinimizer::Penalty penaltyGPS = std::make_tuple(central_penalty_point_in_cutMap,
+                                                                 cov,
+                                                                 central_penalty_point_in_scanner);
 
 
-        //PM::ErrorMinimizer::Penalty pure_gravity_penalty = std::make_tuple(test_att,
-        //                                                                   test_att_w,
-        //                                                                   test_att);
-        //PM::ErrorMinimizer::Penalties penalties = {};
-        //penalties.push_back(pure_gravity_penalty);
-        //TODO: VK End of 4dof hack
+
+        // VK: This block creates the acceleration penalty point
+
+        // VK: Next line was modified for better clarity
+        // PM::Matrix locationAcc = T_cutMap_to_map.inverse() * gravity_penalty_point_in_world.inverse(); // Remove the tf between map and odom
+        PM::Matrix gravity_penalty_point_in_cutMap = T_localMap_to_map.inverse() * gravity_penalty_point_in_world; // Remove the tf between map and odom
+        PM::Matrix gravity_penalty_point_in_scanner = T_odom_to_scanner * gravity_penalty_point_in_world;
+
+        PM::Matrix covAcc(dimp1-1, dimp1-1);
+
+        if (accPenaltyFactor != 0) {
+            covAcc << 0.5 * accPenaltyFactor,   0,   0,
+                    0, 0.5 * accPenaltyFactor,   0,
+                    0,   0, 0.5 * accPenaltyFactor;
+        }
+        else {
+            covAcc = cov;
+        }
+        PM::ErrorMinimizer::Penalty penaltyAcc = std::make_tuple(gravity_penalty_point_in_cutMap,
+                                                                 covAcc,
+                                                                 gravity_penalty_point_in_scanner);
+
+
+
+        // VK: This block creates the yaw penalty point
+        PM::Matrix yaw_penalty_point_in_cutMap = T_localMap_to_map.inverse() * yaw_penalty_point_in_world; // Remove the tf between map and odom
+        PM::Matrix yaw_penalty_point_in_scanner = T_odom_to_scanner * yaw_penalty_point_in_world;
+        PM::ErrorMinimizer::Penalty penaltyYaw = std::make_tuple(yaw_penalty_point_in_cutMap,
+                                                                 cov,
+                                                                 yaw_penalty_point_in_scanner);   // TODO: !!! FROM HERE AS WELL
+
+
+
+        // VK: This block puts the tree penalties together for the ICP
+        //PM::ErrorMinimizer::Penalties penalties = {penaltyGPS, penaltyAcc, penaltyYaw}; // BUG!!
+        PM::ErrorMinimizer::Penalties penalties = {penaltyGPS};
+
+        if (grav_penalty_length != 0) {
+            penalties.push_back(penaltyAcc);
+        }
+        if (rotPenaltyLength != 0) {
+            penalties.push_back(penaltyYaw);
+        }
+
+
+
+//        //TODO: VK: This piece of code disables penalties to test and develop gravity compensation
+//        PM::Matrix test_att(T_odom_to_scanner.inverse());
+//        test_att(3,3) = nan("");
+//
+//        PM::Matrix test_att_w = PM::TransformationParameters::Identity(dimp1-1, dimp1-1)*1000;
+//
+//
+//        PM::ErrorMinimizer::Penalty pure_gravity_penalty = std::make_tuple(test_att,
+//                                                                           test_att_w,
+//                                                                           test_att);
+//        PM::ErrorMinimizer::Penalties penalties = {};
+//        penalties.push_back(pure_gravity_penalty);
+//        //TODO: VK End of 4dof hack
 
 
 		icpMapLock.lock();
-		//T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap, penalties);
-        T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap);
+		T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap, penalties);
+        //T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap);
 		icpMapLock.unlock();
 
 		T_updatedScanner_to_map = T_localMap_to_map * T_updatedScanner_to_localMap;
@@ -561,7 +706,44 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		
 		ROS_DEBUG_STREAM("[ICP] T_odom_to_map:\n" << T_odom_to_map);
 
-		// Publish odometry
+        // Publish arrow markers to show what is going on with the penalty...
+        auto cpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_world, mapFrame, publishStamp);
+        auto gpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_world, mapFrame, publishStamp);
+        auto ypp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_world, mapFrame, publishStamp);
+
+        publishPenaltyMarkerInMapFrame(cpp_in_world_odom,
+                                       gpp_in_world_odom,
+                                       ypp_in_world_odom,
+                                       0.0,
+                                       1.0,
+                                       0.0);
+
+        auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_scanner, sensorFrame, publishStamp);
+        auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
+        auto ypp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_scanner, sensorFrame, publishStamp);
+
+        publishPenaltyMarkerInMapFrame(cpp_in_scanner_odom,
+                                       gpp_in_scanner_odom,
+                                       ypp_in_scanner_odom,
+                                       1.0,
+                                       0.0,
+                                       0.0);
+
+        auto cpp_in_cutMap_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_cutMap, mapFrame, publishStamp);
+        auto gpp_in_cutMap_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_cutMap, mapFrame, publishStamp);
+        auto ypp_in_cutMap_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_cutMap, mapFrame, publishStamp);
+
+        publishPenaltyMarkerInCutMapFrame(cpp_in_cutMap_odom,
+                                          gpp_in_cutMap_odom,
+                                          ypp_in_cutMap_odom,
+                                          0.0,
+                                          1.0,
+                                          0.0,
+                                          1,
+                                          2);
+
+
+        // Publish odometry
 		if (odomPub.getNumSubscribers())
 		{
 			// Not sure that the transformation represents the odometry
@@ -1346,6 +1528,131 @@ bool Mapper::reloadallYaml(std_srvs::Empty::Request &req, std_srvs::Empty::Respo
 	ROS_INFO_STREAM("Parameters reloaded");
 
 	return true;
+}
+
+
+void Mapper::publishPenaltyMarkerInMapFrame(nav_msgs::Odometry& location,
+                                            nav_msgs::Odometry& gravity,
+                                            nav_msgs::Odometry& yaw,
+                                            float red,
+                                            float green,
+                                            float blue)
+{
+
+    geometry_msgs::Point location_point;
+    location_point.x = location.pose.pose.position.x;
+    location_point.y = location.pose.pose.position.y;
+    location_point.z = location.pose.pose.position.z;
+
+    geometry_msgs::Point gravity_point;
+    gravity_point.x = gravity.pose.pose.position.x;
+    gravity_point.y = gravity.pose.pose.position.y;
+    gravity_point.z = gravity.pose.pose.position.z;
+
+    geometry_msgs::Point yaw_point;
+    yaw_point.x = yaw.pose.pose.position.x;
+    yaw_point.y = yaw.pose.pose.position.y;
+    yaw_point.z = yaw.pose.pose.position.z;
+
+
+    // Arrow for gravity penalty
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = location.header.frame_id;
+    marker.header.stamp = location.header.stamp;
+    marker.ns = "penalty_namespace";
+    marker.id = marker_id_counter;
+    marker_id_counter++;
+
+    marker.type = visualization_msgs::Marker::ARROW;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.position.x = 0;
+    marker.pose.position.y = 0;
+    marker.pose.position.z = 0;
+    marker.pose.orientation.x = 0.0;
+    marker.pose.orientation.y = 0.0;
+    marker.pose.orientation.z = 0.0;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.05;
+    marker.scale.y = 0.15;
+    marker.scale.z = 0.0;
+    marker.color.a = 1.0; // Don't forget to set the alpha!
+    marker.color.r = red;
+    marker.color.g = green;
+    marker.color.b = blue;
+
+    marker.points.push_back(location_point);
+    marker.points.push_back(gravity_point);
+
+    penaltyVisMarkerPub.publish(marker);
+
+    // Arrow for yaw penalty
+    marker.id = marker_id_counter;
+    marker_id_counter++;
+    marker.points[1] = yaw_point;
+
+    penaltyVisMarkerPub.publish(marker);
+}
+
+void Mapper::publishPenaltyMarkerInCutMapFrame(nav_msgs::Odometry& location,
+                                               nav_msgs::Odometry& gravity,
+                                               nav_msgs::Odometry& yaw,
+                                               float red,
+                                               float green,
+                                               float blue,
+                                               int id1,
+                                               int id2)
+{
+
+    geometry_msgs::Point location_point;
+    location_point.x = location.pose.pose.position.x;
+    location_point.y = location.pose.pose.position.y;
+    location_point.z = location.pose.pose.position.z;
+
+    geometry_msgs::Point gravity_point;
+    gravity_point.x = gravity.pose.pose.position.x;
+    gravity_point.y = gravity.pose.pose.position.y;
+    gravity_point.z = gravity.pose.pose.position.z;
+
+    geometry_msgs::Point yaw_point;
+    yaw_point.x = yaw.pose.pose.position.x;
+    yaw_point.y = yaw.pose.pose.position.y;
+    yaw_point.z = yaw.pose.pose.position.z;
+
+
+    // Arrow for gravity penalty
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = location.header.frame_id;
+    marker.header.stamp = location.header.stamp;
+    marker.ns = "penalty_cutmap_namespace";
+    marker.id = id1;
+
+    marker.type = visualization_msgs::Marker::ARROW;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.position.x = 0;
+    marker.pose.position.y = 0;
+    marker.pose.position.z = 0;
+    marker.pose.orientation.x = 0.0;
+    marker.pose.orientation.y = 0.0;
+    marker.pose.orientation.z = 0.0;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.05;
+    marker.scale.y = 0.15;
+    marker.scale.z = 0.0;
+    marker.color.a = 1.0; // Don't forget to set the alpha!
+    marker.color.r = red;
+    marker.color.g = green;
+    marker.color.b = blue;
+
+    marker.points.push_back(location_point);
+    marker.points.push_back(gravity_point);
+
+    penaltyCutMapVisMarkerPub.publish(marker);
+
+    // Arrow for yaw penalty
+    marker.id = id2;
+    marker.points[1] = yaw_point;
+
+    penaltyCutMapVisMarkerPub.publish(marker);
 }
 
 // Main function supporting the Mapper class
