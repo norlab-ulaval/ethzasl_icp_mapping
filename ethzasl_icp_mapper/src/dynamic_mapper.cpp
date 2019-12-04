@@ -126,6 +126,8 @@ class Mapper
     double accPenaltyFactor;
 
 	const double mapElevation; // initial correction on z-axis //FIXME: handle the full matrix
+	const double initial_map_z_rotation;
+
 	
 	// Parameters for dynamic filtering
 	const float priorDyn; //!< ratio. Prior to be dynamic when a new point is added
@@ -225,7 +227,8 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	odomFrame(getParam<string>("odom_frame", "odom")),
 	mapFrame(getParam<string>("map_frame", "map")),
 	vtkFinalMapName(getParam<string>("vtkFinalMapName", "finalMap.vtk")),
-	mapElevation(getParam<double>("mapElevation", 0)),
+	mapElevation(getParam<double>("mapElevation", 0.0)),
+    initial_map_z_rotation(getParam<double>("mapZRotationRad", 0.0)),
 	priorDyn(getParam<double>("priorDyn", 0.5)),
 	priorStatic(1. - priorDyn),
 	maxAngle(getParam<double>("maxAngle", 0.02)),
@@ -452,8 +455,18 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
  	{
 		// we need to know the dimensionality of the point cloud to initialize properly
 		publishLock.lock();
-		T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
-		T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
+//		T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
+//        T_odom_to_map << -0.6168985, -0.7870427,  0.0000000, 0.0,
+//                          0.7870427, -0.6168985,  0.0000000, 0.0,
+//                          0.0000000,  0.0000000,  1.0000000, 0.0,
+//                          0.0      ,  0.0000000,  0.0000000, 1.0;
+        Eigen::Transform<double, 3, Eigen::Affine> initial_transform;
+        Eigen::Vector3d unitZ_vector(0.0,0.0,1.0);
+        initial_transform = Eigen::AngleAxis<double>(initial_map_z_rotation, unitZ_vector);
+        T_odom_to_map = initial_transform.matrix().cast<PM::ScalarType>();
+
+
+        T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
 		T_odom_to_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
 		publishLock.unlock();
 	}
