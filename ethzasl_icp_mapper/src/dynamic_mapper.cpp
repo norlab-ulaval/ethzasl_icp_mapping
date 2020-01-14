@@ -118,6 +118,8 @@ class Mapper
 	string odomFrame;
 	string mapFrame;
 	string vtkFinalMapName; //!< name of the final vtk map
+	int skipNScans;
+	int nScansSkippedSoFar;
 
 	// VK: Penalty parameters
     double rotPenaltyLength;
@@ -249,7 +251,9 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
     rotPenaltyLength(getParam<double>("rotPenaltyLength", 1)),
     grav_penalty_length(getParam<double>("grav_penalty_length", 0)),
     penaltyFactor(getParam<double>("penaltyFactor", 1)),
-    accPenaltyFactor(getParam<double>("accPenaltyFactor", 0))
+    accPenaltyFactor(getParam<double>("accPenaltyFactor", 0)),
+    skipNScans(getParam<double>("skipNScans", 0)),
+    nScansSkippedSoFar(0)
 {
 
 
@@ -327,6 +331,17 @@ Mapper::~Mapper()
 
 void Mapper::gotScan(const sensor_msgs::LaserScan& scanMsgIn)
 {
+
+    if(nScansSkippedSoFar>=skipNScans)
+    {
+        nScansSkippedSoFar = 0;
+    }
+    else
+    {
+        nScansSkippedSoFar++;
+        return;
+    }
+
 	if(localizing)
 	{
 		const ros::Time endScanTime(scanMsgIn.header.stamp + ros::Duration(scanMsgIn.time_increment * (scanMsgIn.ranges.size() - 1)));
@@ -349,6 +364,16 @@ void Mapper::gotScan(const sensor_msgs::LaserScan& scanMsgIn)
 
 void Mapper::gotCloud(const sensor_msgs::PointCloud2& cloudMsgIn)
 {
+    if(nScansSkippedSoFar>=skipNScans)
+    {
+        nScansSkippedSoFar = 0;
+    }
+    else
+    {
+        nScansSkippedSoFar++;
+        return;
+    }
+
 	if(localizing)
 	{
 		unique_ptr<DP> cloud(new DP(PointMatcher_ros::rosMsgToPointMatcherCloud<float>(cloudMsgIn)));
@@ -558,13 +583,13 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
         const PM::TransformationParameters gravity_penalty_point_in_world = tmp * central_penalty_point_in_world;
 
 
+
         // Find the location of the yaw penalty point
         tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
-        tmp(0, 3) = rotPenaltyLength;   // tmp points in the x axis direction of the sensor - Warthog
+        tmp(0, 3) = 0.0;   // tmp points in the x axis direction of the sensor - Warthog
         //tmp(0, 3) = -rotPenaltyLength;   // tmp points in the -x axis direction of the sensor - Skidoo
-        tmp(1, 3) = 0.0;
+        tmp(1, 3) = rotPenaltyLength;
         tmp(2, 3) = 0.0;
-
 
         //VK: The next line was in the dense mapper implementation for skidoo. The T_gps_to_scanner transform was fetched in the runtime, but it is a constant.
         // (Sort of). It should be ideally expressed in a "stabilized base link" frame, a one which is parallel with horizon, but rotates with yaw.
