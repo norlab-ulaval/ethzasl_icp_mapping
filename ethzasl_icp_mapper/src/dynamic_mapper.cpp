@@ -415,15 +415,45 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
   ROS_INFO_STREAM("[ICP] Input filters took " << t.elapsed() << " [s]");
 	string reason;
-	// Initialize the transformation to identity if empty
+	// Initialize the transformation to the desired value or leave identity from the constructor
  	if(!icp.hasMap())
  	{
+		bool initial_pose_ready = false;
+		std::vector<double> initial_position;
+		std::vector<double> initial_orientation;
+		bool initial_pose_consumed = true;
+
+		if(pn.hasParam("initial_pose_map_to_odom/position") and
+		   pn.hasParam("initial_pose_map_to_odom/orientation") and
+		   pn.hasParam("initial_pose_map_to_odom/consumed"))
+		{
+			pn.getParam("initial_pose_map_to_odom/consumed", initial_pose_consumed);
+			if(!initial_pose_consumed){
+				pn.getParam("initial_pose_map_to_odom/position", initial_position);
+				pn.getParam("initial_pose_map_to_odom/orientation", initial_orientation);
+				initial_pose_ready = true;
+				pn.setParam("initial_pose_map_to_odom/consumed", true);
+
+				ROS_INFO("[MAP] Initial position parameters found during the map inicialization, will be used.");
+			}
+		}
+
 		// we need to know the dimensionality of the point cloud to initialize properly
-		//publishLock.lock();
-		//T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
-		//T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
-		//T_odom_to_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
-		//publishLock.unlock();
+		publishLock.lock();
+		if(initial_pose_ready) {
+			Eigen::Transform<double, 3, Eigen::Affine> initial_transform;
+			Eigen::Vector3d initial_position_eig(initial_position[0],initial_position[1],initial_position[2]);
+			Eigen::Quaternion<double> initial_orientation_eig(initial_orientation[3],
+															  initial_orientation[0],
+															  initial_orientation[1],
+															  initial_orientation[2]);   // w,x,y,z according to Eigen
+
+			initial_transform = initial_orientation_eig;
+			initial_transform.translation() = initial_position_eig;
+			T_odom_to_map = initial_transform.matrix().cast<PM::ScalarType>();
+			T_odom_to_map = transformation->correctParameters(T_odom_to_map);
+		}
+		publishLock.unlock();
 	}
 	else
 	{
