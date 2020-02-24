@@ -419,11 +419,11 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
  	if(!icp.hasMap())
  	{
 		// we need to know the dimensionality of the point cloud to initialize properly
-		publishLock.lock();
-		T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
-		T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
-		T_odom_to_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
-		publishLock.unlock();
+		//publishLock.lock();
+		//T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
+		//T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
+		//T_odom_to_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
+		//publishLock.unlock();
 	}
 	else
 	{
@@ -1125,12 +1125,12 @@ bool Mapper::reset(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res
 	waitForMapBuildingCompleted();
 	
 	// note: no need for locking as we do ros::spin(), to update if we go for multi-threading
-	publishLock.lock();
+	//publishLock.lock();
 	// WARNING: this will break in 2D
-	T_odom_to_map = PM::TransformationParameters::Identity(4,4);
-	T_localMap_to_map = PM::TransformationParameters::Identity(4,4);
-	T_odom_to_scanner = PM::TransformationParameters::Identity(4,4);
-	publishLock.unlock();
+	//T_odom_to_map = PM::TransformationParameters::Identity(4,4);
+	//T_localMap_to_map = PM::TransformationParameters::Identity(4,4);
+	//T_odom_to_scanner = PM::TransformationParameters::Identity(4,4);
+	//publishLock.unlock();
 
 	icp.clearMap();
 	
