@@ -215,7 +215,8 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	T_localMap_to_map(PM::TransformationParameters::Identity(4, 4)),
 	T_odom_to_scanner(PM::TransformationParameters::Identity(4, 4)),
 	publishStamp(ros::Time::now()),
-	tfListener(ros::Duration(30)),
+	//tfListener(ros::Duration(30)),
+  tfListener(ros::Duration(60)),
 	eps(0.0001)
 {
 
@@ -409,9 +410,10 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		// Apply filters to incoming cloud, in scanner coordinates
 		inputFilters.apply(*newPointCloud);
 		
-		ROS_INFO_STREAM("[ICP] Input filters took " << t.elapsed() << " [s]");
+		ROS_INFO_STREAM("Time difference between point cloud and tf " << ros::Time::now() - stamp << endl);
 	}
 
+  ROS_INFO_STREAM("[ICP] Input filters took " << t.elapsed() << " [s]");
 	string reason;
 	// Initialize the transformation to identity if empty
  	if(!icp.hasMap())
@@ -614,8 +616,8 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	{
 		icpMapLock.unlock();
 		ROS_ERROR_STREAM("[ICP] failed to converge: " << error.what());
-		newPointCloud->save("error_read.vtk");
-		icp.getPrefilteredMap().save("error_ref.vtk");
+		//newPointCloud->save("error_read.vtk");
+		//icp.getPrefilteredMap().save("error_ref.vtk");
 		return;
 	}
 	
