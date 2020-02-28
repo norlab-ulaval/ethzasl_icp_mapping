@@ -84,6 +84,8 @@ class Mapper
 	PM::DataPointsFilters mapPreFilters;
 	PM::DataPointsFilters mapPostFilters;
 	PM::DataPoints *mapPointCloud;
+    PM::DataPoints *mapPointCloudCopyForSaving;
+
 	PM::ICPSequence icp;
 	shared_ptr<PM::Transformation> transformation;
 	shared_ptr<PM::DataPointsFilter> radiusFilter;
@@ -96,8 +98,14 @@ class Mapper
 	MapBuildingTask mapBuildingTask;
 	MapBuildingFuture mapBuildingFuture;
 	bool mapBuildingInProgress;
+
+    boost::thread mapSavingThread;
+    string savedMapFilename;
+
 	#endif // BOOST_VERSION >= 104100
-	bool processingNewCloud; 
+	bool processingNewCloud;
+
+
 
 	// Parameters
 	bool publishMapTf; 
@@ -139,6 +147,7 @@ class Mapper
 	boost::thread publishThread;
 	boost::mutex publishLock;
 	boost::mutex icpMapLock;
+    boost::mutex saveMapLock;
 	ros::Time publishStamp;
 	
 	tf::TransformListener tfListener;
@@ -159,6 +168,7 @@ protected:
 	DP* updateMap(DP* newPointCloud, const PM::TransformationParameters T_updatedScanner_to_map, bool mapExists);
 	void waitForMapBuildingCompleted();
 	void updateIcpMap(const DP* newMapPointCloud);
+    void saveMapTask();
 	
 	void publishLoop(double publishPeriod);
 	void publishTransform();
@@ -180,6 +190,7 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	n(n),
 	pn(pn),
 	mapPointCloud(0),
+    mapPointCloudCopyForSaving(0),
 	transformation(PM::get().REG(Transformation).create("RigidTransformation")),
 	#if BOOST_VERSION >= 104100
 	mapBuildingInProgress(false),
@@ -216,8 +227,9 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	T_odom_to_scanner(PM::TransformationParameters::Identity(4, 4)),
 	publishStamp(ros::Time::now()),
 	//tfListener(ros::Duration(30)),
-  tfListener(ros::Duration(60)),
+    tfListener(ros::Duration(60)),
 	eps(0.0001)
+
 {
 
 
@@ -1098,21 +1110,56 @@ bool Mapper::getPointMap(map_msgs::GetPointMap::Request &req, map_msgs::GetPoint
 
 bool Mapper::saveMap(map_msgs::SaveMap::Request &req, map_msgs::SaveMap::Response &res)
 {
-	if (!mapPointCloud)
-		return false;
-	
-	try
-	{
-		mapPointCloud->save(req.filename.data);
+	if (!mapPointCloud) {
+        return false;
+    }
+
+	if(saveMapLock.try_lock()) {
+        if (mapPointCloudCopyForSaving) {
+            delete mapPointCloudCopyForSaving;
+        }
+
+        timer t;
+
+        mapPointCloudCopyForSaving = new PM::DataPoints(mapPointCloud->features,
+                                                        mapPointCloud->featureLabels,
+                                                        mapPointCloud->descriptors,
+                                                        mapPointCloud->descriptorLabels,
+                                                        mapPointCloud->times,
+                                                        mapPointCloud->timeLabels);
+        savedMapFilename = req.filename.data;
+
+        mapSavingThread = boost::thread(boost::bind(&Mapper::saveMapTask, this));
+        mapSavingThread.detach();
+
+        ROS_INFO_STREAM("[MAP] Map copy created in RAM in " << t.elapsed() << " [s], with " <<
+                        mapPointCloudCopyForSaving->getNbPoints() << " points. Dispatching a thread to save it.");
+        return true;
+    } else{
+        ROS_INFO_STREAM("[MAP] Cannot save the map, one is being saved right now. Wait a little.");
+        return false;
 	}
-	catch (const std::runtime_error& e)
-	{
-		ROS_ERROR_STREAM("Unable to save: " << e.what());
-		return false;
-	}
-	
-	ROS_INFO_STREAM("[MAP] saved at " <<  req.filename.data << " with " << mapPointCloud->features.cols() << " points.");
-	return true;
+}
+
+void Mapper::saveMapTask()
+{
+    timer t;
+
+    try
+    {
+        mapPointCloudCopyForSaving->save(savedMapFilename);
+    }
+    catch (const std::runtime_error& e)
+    {
+        ROS_ERROR_STREAM("Unable to save: " << e.what());
+        saveMapLock.unlock();
+        return;
+    }
+
+    ROS_INFO_STREAM("[MAP] saved at " <<  savedMapFilename << " with " << mapPointCloudCopyForSaving->features.cols() <<
+                    " points in " << t.elapsed() << " seconds.");
+
+    saveMapLock.unlock();
 }
 
 bool Mapper::loadMap(ethzasl_icp_mapper::LoadMap::Request &req, ethzasl_icp_mapper::LoadMap::Response &res)
