@@ -1,10 +1,16 @@
+- CutAtDescriptorThresholdDataPointsFilter:
+    descName: "probabilityDynamic"
+    useLargerThan: 1
+    threshold: 0.9
+
+# - RandomSamplingDataPointsFilter:
+#     prob: 0.9
+
 - SurfaceNormalDataPointsFilter:
-    knn: 20
+    knn: 15
     epsilon: 3.16
     keepNormals: 1
     keepDensities: 1
-- MaxDensityDataPointsFilter:
-    maxDensity: 10
-- MaxPointCountDataPointsFilter:
-    maxCount: 600000
-    prob: 0.7
+
+# - MaxDensityDataPointsFilter:
+#     maxDensity: 10.0
