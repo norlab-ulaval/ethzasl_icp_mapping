@@ -634,7 +634,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
             PM::Matrix tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
             tmp(0, 3) = 0.0;
             tmp(1, 3) = 0.0;
-            tmp(2, 3) = grav_penalty_length;
+            tmp(2, 3) = -grav_penalty_length;
 
             //compute the tf for the gravity penalty with or without the GPS penalty
             gravity_penalty_point_in_world = PM::TransformationParameters::Identity(dimp1, dimp1);
@@ -862,7 +862,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		ROS_DEBUG_STREAM("[ICP] T_odom_to_map:\n" << T_odom_to_map);
 
 
-/*
+
         // Publish arrow markers to show what is going on with the penalty...
         auto cpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_gps_to_scanner, mapFrame, publishStamp);
         auto gpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_world, mapFrame, publishStamp);
@@ -874,21 +874,21 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
                                        0.0,
                                        1.0,
                                        0.0); // vert
-                */
-         /*
-        auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_scanner, sensorFrame, publishStamp);
+
+
+        /*auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_scanner, sensorFrame, publishStamp);
         auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
         auto ypp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_scanner, sensorFrame, publishStamp);
         publishPenaltyMarkerInMapFrame(cpp_in_scanner_odom, gpp_in_scanner_odom, ypp_in_scanner_odom,1.0, 0.0,0.0); //rouge */
 
-
+/*
         if(Gravity_penalty)
         {
             auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_odom_to_scanner.inverse(), sensorFrame, publishStamp);
             auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
             publishOnePenaltyMarkerInMapFrame(cpp_in_scanner_odom, gpp_in_scanner_odom,1.0, 0.0,0.0); //rouge
-        }
-        /*
+        }*/
+
         auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_scanner, sensorFrame, publishStamp);
         auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
         auto ypp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_scanner, sensorFrame, publishStamp);
@@ -906,7 +906,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
                                           0.0,
                                           1,
                                           2);  //vert
-*/
+
         // Publish odometry
 		if (odomPub.getNumSubscribers())
 		{

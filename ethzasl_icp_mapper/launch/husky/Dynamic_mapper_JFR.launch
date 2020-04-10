@@ -17,12 +17,12 @@
 		<param name="mapping" value="true" />
 
 	  <!-- Parameters for Penalty -->
-	  <param name="GPS_penalty" value="false"/>
-	  <param name="penaltyFactor" value="1"/>
+	  <param name="GPS_penalty" value="true"/>
+	  <param name="penaltyFactor" value="10"/>
 
     <param name="Gravity_penalty" value="true"/>
-    <param name="grav_penalty_length" value="1"/>
-    <param name="accPenaltyFactor" value="100"/>
+    <param name="grav_penalty_length" value="100"/>
+    <param name="accPenaltyFactor" value="10"/>
 
     <param name="Yaw_penalty" value="false"/>
     <param name="rotPenaltyLength" value="80"/>
