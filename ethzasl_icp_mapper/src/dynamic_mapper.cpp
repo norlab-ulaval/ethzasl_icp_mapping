@@ -1,5 +1,4 @@
 #include <fstream>
-#include <iostream>
 
 #include <boost/version.hpp>
 #include <boost/thread.hpp>
@@ -37,7 +36,6 @@
 #include "ethzasl_icp_mapper/SetMode.h"
 #include "ethzasl_icp_mapper/GetMode.h"
 #include "ethzasl_icp_mapper/GetBoundedMap.h" // FIXME: should that be moved to map_msgs?
-//#include "ethzasl_icp_mapper/RestartMap.h"
 
 using namespace std;
 using namespace PointMatcherSupport;
@@ -58,6 +56,7 @@ class Mapper
 	// Subscribers
 	ros::Subscriber scanSub;
 	ros::Subscriber cloudSub;
+	ros::Subscriber gps_odomSub;
 	
 	// Publishers
 	ros::Publisher mapPub;
@@ -67,6 +66,7 @@ class Mapper
 	ros::Publisher odomErrorPub;
     ros::Publisher penaltyVisMarkerPub; //VK: for seeing what is going on
     ros::Publisher penaltyCutMapVisMarkerPub; //VK: for seeing what is going on
+    ros::Publisher GPSPub;
 	
 	// Services
 	ros::ServiceServer getPointMapSrv;
@@ -78,7 +78,6 @@ class Mapper
 	ros::ServiceServer getModeSrv;
 	ros::ServiceServer getBoundedMapSrv;
 	ros::ServiceServer reloadAllYamlSrv;
-	//ros::ServiceServer RestartMapSrv ;
 
 	// Time
 	ros::Time mapCreationTime;
@@ -87,7 +86,6 @@ class Mapper
 
 	// libpointmatcher
 	PM::DataPointsFilters inputFilters;
-	PM::DataPointsFilters inputFiltersWorld;
 	PM::DataPointsFilters mapPreFilters;
 	PM::DataPointsFilters mapPostFilters;
 	PM::DataPoints *mapPointCloud;
@@ -111,6 +109,7 @@ class Mapper
 	bool useConstMotionModel; 
 	bool localizing;
 	bool mapping;
+	bool originGpsOdom;
 	bool inverseTransform; // If true, publish the inverse transform, useful to maintain a tree in TF
 	int minReadingPointCount;
 	int minMapPointCount;
@@ -122,18 +121,19 @@ class Mapper
 	string odomFrame;
 	string mapFrame;
 	string vtkFinalMapName; //!< name of the final vtk map
-	int skipNScans;
-	int nScansSkippedSoFar;
 
 	// VK: Penalty parameters
     double rotPenaltyLength;
     double grav_penalty_length;
     double penaltyFactor;
     double accPenaltyFactor;
+    bool GPS_penalty;
+    bool Gravity_penalty;
+    bool Yaw_penalty;
+    string Scanner_frame;
+    string Baselink_frame;
 
 	const double mapElevation; // initial correction on z-axis //FIXME: handle the full matrix
-	const double initial_map_z_rotation;
-
 	
 	// Parameters for dynamic filtering
 	const float priorDyn; //!< ratio. Prior to be dynamic when a new point is added
@@ -146,13 +146,15 @@ class Mapper
 	const float maxDyn; //!< ratio. Threshold for which a point will stay dynamic
 	const float maxDistNewPoint; //!< in meter. Distance at which a new point will be added in the global map.
 	const float sensorMaxRange; //!< in meter. Maximum reading distance of the laser. Used to cut the global map before matching.
-
-
 	
-
 	PM::TransformationParameters T_odom_to_map;
 	PM::TransformationParameters T_localMap_to_map;
 	PM::TransformationParameters T_odom_to_scanner;
+	PM::TransformationParameters T_gps_to_map;
+	PM::TransformationParameters T_gps_to_map_origin;
+	PM::TransformationParameters T_gps_to_scanner;
+	PM::TransformationParameters T_scanner_to_baselink;
+    Eigen::Matrix3f T_scanner_to_baselink_stabilized;
 	boost::thread publishThread;
 	boost::mutex publishLock;
 	boost::mutex icpMapLock;
@@ -170,6 +172,7 @@ public:
 protected:
 	void gotScan(const sensor_msgs::LaserScan& scanMsgIn);
 	void gotCloud(const sensor_msgs::PointCloud2& cloudMsgIn);
+	void gotGpsOdom(const nav_msgs::Odometry& GpsOdom);
 	void processCloud(unique_ptr<DP> cloud, const std::string& scannerFrame, const ros::Time& stamp, uint32_t seq);
 	void processNewMapIfAvailable();
 	void setMap(DP* newPointCloud);
@@ -180,6 +183,11 @@ protected:
 	void publishLoop(double publishPeriod);
 	void publishTransform();
 	void loadExternalParameters();
+
+    void publishOnePenaltyMarkerInMapFrame(nav_msgs::Odometry& location, nav_msgs::Odometry& gravity,
+                                        float red,
+                                        float green,
+                                        float blue);
 
     void publishPenaltyMarkerInMapFrame(nav_msgs::Odometry& location,
                                         nav_msgs::Odometry& gravity,
@@ -207,8 +215,6 @@ protected:
 	bool getMode(ethzasl_icp_mapper::GetMode::Request &req, ethzasl_icp_mapper::GetMode::Response &res);
 	bool getBoundedMap(ethzasl_icp_mapper::GetBoundedMap::Request &req, ethzasl_icp_mapper::GetBoundedMap::Response &res);
 	bool reloadallYaml(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
-	//bool RestartMap(ethzasl_icp_mapper::RestartMap::Request &req, ethzasl_icp_mapper::RestartMap::Response &res);
-
 };
 
 Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
@@ -235,8 +241,7 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	odomFrame(getParam<string>("odom_frame", "odom")),
 	mapFrame(getParam<string>("map_frame", "map")),
 	vtkFinalMapName(getParam<string>("vtkFinalMapName", "finalMap.vtk")),
-	mapElevation(getParam<double>("mapElevation", 0.0)),
-    initial_map_z_rotation(getParam<double>("mapZRotationRad", 0.0)),
+	mapElevation(getParam<double>("mapElevation", 0)),
 	priorDyn(getParam<double>("priorDyn", 0.5)),
 	priorStatic(1. - priorDyn),
 	maxAngle(getParam<double>("maxAngle", 0.02)),
@@ -258,36 +263,51 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
     grav_penalty_length(getParam<double>("grav_penalty_length", 0)),
     penaltyFactor(getParam<double>("penaltyFactor", 1)),
     accPenaltyFactor(getParam<double>("accPenaltyFactor", 0)),
-    skipNScans(getParam<double>("skipNScans", 0)),
-    nScansSkippedSoFar(0)
-{
+    GPS_penalty(getParam<bool>("GPS_penalty", false)),
+    Gravity_penalty(getParam<bool>("Gravity_penalty", false)),
+    Yaw_penalty(getParam<bool>("Yaw_penalty", false)),
+    Scanner_frame(getParam<string>("Scanner_frame", "")),
+    Baselink_frame(getParam<string>("Baselink_frame", ""))
 
+{
+	
+	
 	// Ensure proper states
 	if(localizing == false)
 		mapping = false;
 	if(mapping == true)
 		localizing = true;
+	
 	// set logger
-	if (getParam<bool>("useROSLogger", false))
+	if(getParam<bool>("useROSLogger", false))
 		PointMatcherSupport::setLogger(make_shared<PointMatcherSupport::ROSLogger>());
+	
 	// Load all parameters stored in external files
 	loadExternalParameters();
+	
 	PM::Parameters params;
 	params["dim"] = "-1";
 	params["maxDist"] = toParam(sensorMaxRange);
-
+	
 	radiusFilter = PM::get().DataPointsFilterRegistrar.create("MaxDistDataPointsFilter", params);
+	
 	// topic initializations
-	if (getParam<bool>("subscribe_scan", true))
+	if(getParam<bool>("subscribe_scan", true))
 		scanSub = n.subscribe("scan", inputQueueSize, &Mapper::gotScan, this);
-	if (getParam<bool>("subscribe_cloud", true))
+	if(getParam<bool>("subscribe_cloud", true))
 		cloudSub = n.subscribe("cloud_in", inputQueueSize, &Mapper::gotCloud, this);
+	if(getParam<bool>("GPS_penalty", true) || getParam<bool>("Yaw_penalty", true))
+	{
+		originGpsOdom = false;
+		gps_odomSub = n.subscribe("odom_utm", inputQueueSize, &Mapper::gotGpsOdom, this);
+	}
 
 	mapPub = n.advertise<sensor_msgs::PointCloud2>("point_map", 2, true);
 	scanPub = n.advertise<sensor_msgs::PointCloud2>("corrected_scan", 2, true);
 	outlierPub = n.advertise<sensor_msgs::PointCloud2>("outliers", 2, true);
 	odomPub = n.advertise<nav_msgs::Odometry>("icp_odom", 50, true);
 	odomErrorPub = n.advertise<nav_msgs::Odometry>("icp_error_odom", 50, true);
+    GPSPub = n.advertise<nav_msgs::Odometry>("GPS_odom", 50, true);
 
 	//VK: The penalty visualisation
     penaltyVisMarkerPub = n.advertise<visualization_msgs::Marker>( "penalty_visualization_marker", 5 );
@@ -303,7 +323,6 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	getModeSrv = pn.advertiseService("get_mode", &Mapper::getMode, this);
 	getBoundedMapSrv = pn.advertiseService("get_bounded_map", &Mapper::getBoundedMap, this);
 	reloadAllYamlSrv= pn.advertiseService("reload_all_yaml", &Mapper::reloadallYaml, this);
-	//RestartMapSrv = pn.advertiseService("RestartMap", &Mapper::RestartMap, this);
 
 	// refreshing tf transform thread
 	publishThread = boost::thread(boost::bind(&Mapper::publishLoop, this, tfRefreshPeriod));
@@ -333,17 +352,6 @@ Mapper::~Mapper()
 
 void Mapper::gotScan(const sensor_msgs::LaserScan& scanMsgIn)
 {
-
-    if(nScansSkippedSoFar>=skipNScans)
-    {
-        nScansSkippedSoFar = 0;
-    }
-    else
-    {
-        nScansSkippedSoFar++;
-        return;
-    }
-
 	if(localizing)
 	{
 		const ros::Time endScanTime(scanMsgIn.header.stamp + ros::Duration(scanMsgIn.time_increment * (scanMsgIn.ranges.size() - 1)));
@@ -366,16 +374,6 @@ void Mapper::gotScan(const sensor_msgs::LaserScan& scanMsgIn)
 
 void Mapper::gotCloud(const sensor_msgs::PointCloud2& cloudMsgIn)
 {
-    if(nScansSkippedSoFar>=skipNScans)
-    {
-        nScansSkippedSoFar = 0;
-    }
-    else
-    {
-        nScansSkippedSoFar++;
-        return;
-    }
-
 	if(localizing)
 	{
 		unique_ptr<DP> cloud(new DP(PointMatcher_ros::rosMsgToPointMatcherCloud<float>(cloudMsgIn)));
@@ -392,6 +390,44 @@ void Mapper::gotCloud(const sensor_msgs::PointCloud2& cloudMsgIn)
 		processCloud(move(cloud), cloudMsgIn.header.frame_id, cloudMsgIn.header.stamp, cloudMsgIn.header.seq);
 	}
 }
+
+/***********************************************************************************/
+/*Subscribe to the GPS odometry and compute the tf between Map and GPS*/
+
+void Mapper::gotGpsOdom(const nav_msgs::Odometry& GpsOdom)
+{
+    ROS_INFO_STREAM("[MAP] GPS odom");
+    //define the origin of the GPS odometry
+	if(originGpsOdom == false)
+	{
+		T_gps_to_map_origin = PM::Matrix::Identity(4, 4);
+		T_gps_to_map_origin(0,3)=GpsOdom.pose.pose.position.x;
+		T_gps_to_map_origin(1,3)=GpsOdom.pose.pose.position.y;
+		T_gps_to_map_origin(2,3)=GpsOdom.pose.pose.position.z;
+		originGpsOdom = true;
+	}
+	T_gps_to_map = PM::TransformationParameters::Identity(4, 4);
+	T_gps_to_map(0,3)=GpsOdom.pose.pose.position.x - T_gps_to_map_origin(0,3);
+	T_gps_to_map(1,3)=GpsOdom.pose.pose.position.y - T_gps_to_map_origin(1,3);
+	T_gps_to_map(2,3)=GpsOdom.pose.pose.position.z - T_gps_to_map_origin(2,3);
+
+    //GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_gps_to_map, mapFrame, GpsOdom.header.stamp));
+	
+	//std::cerr << "GPS odom: " << T_gps_to_map << endl;
+    ROS_INFO_STREAM("[MAP] Base_link");
+	//TO DO: Change to call it one time instead of each time
+	//tf between the baselink and scanner in order to compute the tf scanner_to_baselink_stabilized
+	T_scanner_to_baselink = PointMatcher_ros::eigenMatrixToDim<float>(
+			PointMatcher_ros::transformListenerToEigenMatrix<float>(
+					tfListener,
+					Scanner_frame, // to
+					Baselink_frame, // from
+					GpsOdom.header.stamp
+			), 4);
+	
+	//std::cerr << "GPS static: " << T_gps_to_scanner << endl;
+}
+/***********************************************************************************/
 
 struct BoolSetter
 {
@@ -466,19 +502,15 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		return;
 	}
 
-/*
+
 	{
 		timer t; // Print how long take the algo
-	
-		*newPointCloud = transformation->compute(*newPointCloud, T_updatedScanner_to_map);
-		inputFiltersWorld.apply(*newPointCloud);
-
-
+		
 		// Apply filters to incoming cloud, in scanner coordinates
 		inputFilters.apply(*newPointCloud);
 		
 		ROS_INFO_STREAM("[ICP] Input filters took " << t.elapsed() << " [s]");
-	}*/
+	}
 
 	string reason;
 	// Initialize the transformation to identity if empty
@@ -486,18 +518,8 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
  	{
 		// we need to know the dimensionality of the point cloud to initialize properly
 		publishLock.lock();
-//		T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
-//        T_odom_to_map << -0.6168985, -0.7870427,  0.0000000, 0.0,
-//                          0.7870427, -0.6168985,  0.0000000, 0.0,
-//                          0.0000000,  0.0000000,  1.0000000, 0.0,
-//                          0.0      ,  0.0000000,  0.0000000, 1.0;
-        Eigen::Transform<double, 3, Eigen::Affine> initial_transform;
-        Eigen::Vector3d unitZ_vector(0.0,0.0,1.0);
-        initial_transform = Eigen::AngleAxis<double>(initial_map_z_rotation, unitZ_vector);
-        T_odom_to_map = initial_transform.matrix().cast<PM::ScalarType>();
-
-
-        T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
+		T_odom_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
+		T_localMap_to_map = PM::TransformationParameters::Identity(dimp1, dimp1);
 		T_odom_to_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
 		publishLock.unlock();
 	}
@@ -543,19 +565,6 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 	const PM::TransformationParameters T_scanner_to_localMap = transformation->correctParameters(T_localMap_to_map.inverse() * T_scanner_to_map);
 
-	{
-		timer t; // Print how long take the algo
-	
-		*newPointCloud = transformation->compute(*newPointCloud, T_scanner_to_map);
-		inputFiltersWorld.apply(*newPointCloud);
-		*newPointCloud = transformation->compute(*newPointCloud, T_scanner_to_map.inverse());
-
-		// Apply filters to incoming cloud, in scanner coordinates
-		inputFilters.apply(*newPointCloud);
-		
-		//ROS_INFO_STREAM("[ICP] Input filters took " << t.elapsed() << " [s]");
-	}
-
 	// Ensure a minimum amount of point after filtering
 	ptsCount = newPointCloud->getNbPoints();
 	if(ptsCount < minReadingPointCount)
@@ -567,7 +576,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	// Initialize the map if empty
  	if(!icp.hasMap())
  	{
-		//ROS_INFO_STREAM("[MAP] Creating an initial map");
+		ROS_INFO_STREAM("[MAP] Creating an initial map");
 		mapCreationTime = stamp;
 		setMap(updateMap(newPointCloud.release(), T_scanner_to_map, false));
 		// we must not delete newPointCloud because we just stored it in the mapPointCloud
@@ -580,57 +589,111 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		ROS_ERROR_STREAM("[ICP] Dimensionality missmatch: incoming cloud is " << newPointCloud->getEuclideanDim() << " while map is " << icp.getPrefilteredInternalMap().getEuclideanDim());
 		return;
 	}
-	
-	try 
+
+
+
+	try
 	{
-	    // VK: This block of code was taken from the branch "Vlads_getting_to_know_the_stuff"(follower of "skidoo_exp") of the dense_icp_mapper
-	    // It sets up penalty points, given the prior contans translation from GPS and orientation from IMU
+        ROS_INFO_STREAM("[MAP] Compute penalty");
+        /*********************************************************************/
+        //     Compute the tf for the penalty
 
-        // Find the location of the central penalty point
-        PM::Matrix central_penalty_point_in_world = T_odom_to_scanner.inverse();
-        central_penalty_point_in_world.block(0, 0, dimp1-1, dimp1-1) = PM::TransformationParameters::Identity(dimp1-1, dimp1-1);
+        // Find the location of the central penalty point for GPS
+        PM::Matrix gravity_penalty_point_in_world = PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix cov(dimp1 - 1, dimp1 - 1);
+        PM::TransformationParameters yaw_penalty_point_in_world = PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::ErrorMinimizer::Penalty penaltyGPS;
+        PM::ErrorMinimizer::Penalty penaltyAcc;
+        PM::ErrorMinimizer::Penalty penaltyYaw;
+        PM::Matrix central_penalty_point_in_scanner = PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix gravity_penalty_point_in_scanner= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix yaw_penalty_point_in_scanner= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix central_penalty_point_in_cutMap= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix gravity_penalty_point_in_cutMap= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix yaw_penalty_point_in_cutMap= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::Matrix T_gps_to_scanner= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
+        PM::TransformationParameters rotation_from_scanner_to_gps= PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
 
-        // Find the location of the acceleration penalty point
-        PM::TransformationParameters tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
-        tmp(0, 3) = 0.0;
-        tmp(1, 3) = 0.0;
-        tmp(2, 3) = -grav_penalty_length;
+        if(GPS_penalty || Yaw_penalty) {
+            ROS_INFO_STREAM("[MAP] Compute GPS penalty");
+            //cout << T_gps_to_map << endl;
+            //cout << (T_scanner_to_map.inverse()) << endl;
 
-        // VK: This was not correct, it should be location(in full map, not cut) + offset down
-        //const PM::TransformationParameters gravity_penalty_point_in_world = tmp * T_gps_to_scanner_no_rot *  T_gps_link_to_gps * correction.inverse() * T_world_to_gps_link;
-        // VK: As shown below:
-        const PM::TransformationParameters gravity_penalty_point_in_world = tmp * central_penalty_point_in_world;
+            //T_gps_to_scanner = transformation->correctParameters(T_gps_to_map * T_scanner_to_map.inverse());
+            T_gps_to_scanner = T_gps_to_map;
+            T_gps_to_scanner.block(0, 0, dimp1 - 1, dimp1 - 1) = PM::TransformationParameters::Identity(dimp1 - 1,dimp1 - 1);
 
+            //GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_gps_to_scanner, mapFrame, stamp));
+            //cout << "T_gps_to_scanner: " << T_gps_to_scanner << endl;
 
+        }
 
-        // Find the location of the yaw penalty point
-        tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
-        tmp(0, 3) = 0.0;   // tmp points in the x axis direction of the sensor - Warthog
-        //tmp(0, 3) = -rotPenaltyLength;   // tmp points in the -x axis direction of the sensor - Skidoo
-        tmp(1, 3) = rotPenaltyLength;
-        tmp(2, 3) = 0.0;
+        if(Gravity_penalty) {
+            ROS_INFO_STREAM("[MAP] Compute Gravity penalty");
+            // Find the location of the acceleration penalty point
+            PM::Matrix tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
+            tmp(0, 3) = 0.0;
+            tmp(1, 3) = 0.0;
+            tmp(2, 3) = grav_penalty_length;
 
-        //VK: The next line was in the dense mapper implementation for skidoo. The T_gps_to_scanner transform was fetched in the runtime, but it is a constant.
-        // (Sort of). It should be ideally expressed in a "stabilized base link" frame, a one which is parallel with horizon, but rotates with yaw.
-        // I am not doing that.
-        // For the main laser on warthog, the rotation is identity as long as the robot is not inclined much...
-        // TODO: If we switch to an inclined sensor, this has to be fixed accordingly
-        //PM::TransformationParameters rotation_from_scanner_to_gps = T_gps_to_scanner;
-        PM::TransformationParameters rotation_from_scanner_to_gps = PM::TransformationParameters::Identity(dimp1, dimp1);
-        rotation_from_scanner_to_gps(0,3)=0.0;
-        rotation_from_scanner_to_gps(1,3)=0.0;
-        rotation_from_scanner_to_gps(2,3)=0.0;
-        // TODO: VK: This should be location (in full map) + offset forward (in direction of yaw), ideally
-        // The next line takes a point lying on the x axis of the scanner, rotates by the angle between scanner and GPS (VERY SKIDOOO SPECIFIC...)
-        // and finally transforms it to the world frame
-        PM::TransformationParameters yaw_penalty_point_in_world = T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;
-        yaw_penalty_point_in_world.block(0, 0, dimp1-1, dimp1-1) = PM::TransformationParameters::Identity(dimp1-1, dimp1-1);
-        // The next line simply projects the point to the xy world plane by setting the z coordinate equal to the z component of the central point
-        yaw_penalty_point_in_world(2,3) = central_penalty_point_in_world(2,3);
+            //compute the tf for the gravity penalty with or without the GPS penalty
+            gravity_penalty_point_in_world = PM::TransformationParameters::Identity(dimp1, dimp1);
+            if (GPS_penalty || Yaw_penalty) {
+                gravity_penalty_point_in_world = tmp * T_gps_to_scanner;  //IF GPS PENALTY ENABLED
+            } else {
+                gravity_penalty_point_in_world = (tmp * (T_odom_to_scanner));
+                /*gravity_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1)=T_odom_to_scanner.block(0, 0, dimp1 - 1, dimp1 - 1);
+                gravity_penalty_point_in_world(0,3)=T_odom_to_scanner(0,3);
+                gravity_penalty_point_in_world(1,3)=T_odom_to_scanner(0,3);
+                gravity_penalty_point_in_world(2,3)=-grav_penalty_length;*/
+            }
+
+            GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_world, sensorFrame, stamp));
+        }
+
+        if(Yaw_penalty) {
+            ROS_INFO_STREAM("[MAP] Compute Yaw penalty");
+            // Find the location of the yaw penalty point
+            PM::Matrix tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
+            tmp = PM::TransformationParameters::Identity(dimp1, dimp1);
+            tmp(0, 3) = rotPenaltyLength;
+            tmp(1, 3) = 0.0;
+            tmp(2, 3) = 0.0;
+
+            //compute the tf for the yaw penalty
+            //first compute the tf scanner_to_baselink_stabilized (only keep the yaw rotation, not pitch and roll)
+            rotation_from_scanner_to_gps = PM::TransformationParameters::Identity(dimp1, dimp1);  //********************* CORRECT WITH THE RIGHT ORIENTATION
+            Eigen::Matrix3f T_scanner_to_baselink_rotation = T_scanner_to_baselink.block(0, 0, dimp1 - 1, dimp1 - 1);
+            Eigen::Vector3f euler = T_scanner_to_baselink_rotation.eulerAngles(2, 1, 0);
+            euler(1) = 0.0;
+            euler(2) = 0.0;
+
+            T_scanner_to_baselink_stabilized = Eigen::AngleAxisf(euler(2), Eigen::Vector3f::UnitZ())
+                                               * Eigen::AngleAxisf(euler(1), Eigen::Vector3f::UnitY())
+                                               * Eigen::AngleAxisf(euler(0), Eigen::Vector3f::UnitX());
+
+            rotation_from_scanner_to_gps.block(0, 0, dimp1 - 1, dimp1 - 1) = T_scanner_to_baselink_stabilized;
+
+            //then compute the tf of the yaw penalty with or without the GPS penalty
+            if (GPS_penalty) {
+                yaw_penalty_point_in_world =
+                        T_gps_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;  //IF GPS PENALTY ENABLED
+                yaw_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1) = PM::TransformationParameters::Identity(
+                        dimp1 - 1, dimp1 - 1);
+                // The next line simply projects the point to the xy world plane by setting the z coordinate equal to the z component of the central point
+                yaw_penalty_point_in_world(2, 3) = T_gps_to_scanner(2, 3);
+            } else {
+                yaw_penalty_point_in_world = T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;
+                yaw_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1) = PM::TransformationParameters::Identity(
+                        dimp1 - 1, dimp1 - 1);
+                // The next line simply projects the point to the xy world plane by setting the z coordinate equal to the z component of the central point
+                yaw_penalty_point_in_world(2, 3) = T_odom_to_scanner(2, 3);
+            }
+        }
+
 
         //VK: Now ends the block with preparation for the penalties, the next part has to construct the penalties
-
-
+        ROS_INFO_STREAM("[MAP] Apply penalty");
 
 		// Apply ICP
 		PM::TransformationParameters T_updatedScanner_to_map;
@@ -639,69 +702,105 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		ROS_INFO_STREAM("[ICP] Computing - reading: " << newPointCloud->getNbPoints() << ", reference: " << icp.getInternalMap().getNbPoints() );
 
 
+        // VK: This part actually contructs the penalty object
+        if(GPS_penalty || Yaw_penalty) {
+            ROS_INFO_STREAM("[MAP] Apply GPS penalty");
+            // VK: This block creates the central penalty point penalty   //GPS PENALTY
+            central_penalty_point_in_cutMap =
+                    T_localMap_to_map.inverse() * T_gps_to_scanner; // Remove the tf between map and odom
 
-        // VK: This part actually contructs the penalty objects
+            cov << 0.5 * penaltyFactor, 0, 0,
+                    0, 0.5 * penaltyFactor, 0,
+                    0, 0, 0.5 * penaltyFactor;
 
-        // VK: This block creates the central penalty point penalty
-        PM::Matrix central_penalty_point_in_cutMap = T_localMap_to_map.inverse() * central_penalty_point_in_world; // Remove the tf between map and odom
-        PM::Matrix cov(dimp1-1, dimp1-1);
-
-        cov     << 0.5 * penaltyFactor,   0,   0,
-                0, 0.5 * penaltyFactor,   0,
-                0,   0, 0.5 * penaltyFactor;
-
-        PM::Matrix central_penalty_point_in_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
-        PM::ErrorMinimizer::Penalty penaltyGPS = std::make_tuple(central_penalty_point_in_cutMap,
-                                                                 cov,
-                                                                 central_penalty_point_in_scanner);
-
-
-
+            central_penalty_point_in_scanner = PM::TransformationParameters::Identity(dimp1, dimp1);
+            penaltyGPS = std::make_tuple(central_penalty_point_in_cutMap,
+                                                                     cov,
+                                                                     central_penalty_point_in_scanner);
+            //cout << "central_penalty_point_in_cutMap: " << central_penalty_point_in_cutMap << endl;
+            //cout << "cov: " << cov << endl;
+            //cout << "central_penalty_point_in_scanner: " << central_penalty_point_in_scanner << endl;
+            //cout << "T_localMap_to_map: " << T_localMap_to_map << endl;
+            //cout << "T_gps_to_scanner: " << T_gps_to_scanner << endl;
+        }
         // VK: This block creates the acceleration penalty point
 
-        // VK: Next line was modified for better clarity
-        // PM::Matrix locationAcc = T_cutMap_to_map.inverse() * gravity_penalty_point_in_world.inverse(); // Remove the tf between map and odom
-        PM::Matrix gravity_penalty_point_in_cutMap = T_localMap_to_map.inverse() * gravity_penalty_point_in_world; // Remove the tf between map and odom
-        PM::Matrix gravity_penalty_point_in_scanner = T_odom_to_scanner * gravity_penalty_point_in_world;
+        if(Gravity_penalty) {
+            ROS_INFO_STREAM("[MAP] Apply Gravity penalty");
+            //Gravity PENALTY
+            gravity_penalty_point_in_cutMap =
+                    T_localMap_to_map.inverse() * gravity_penalty_point_in_world; // Remove the tf between map and odom
+            if (GPS_penalty || Yaw_penalty) {
+                gravity_penalty_point_in_scanner =
+                        T_gps_to_scanner * gravity_penalty_point_in_world;  //IF GPS PENALTY ENABLED
+            } else {
+                gravity_penalty_point_in_scanner = T_odom_to_scanner * gravity_penalty_point_in_world;
+            }
 
-        PM::Matrix covAcc(dimp1-1, dimp1-1);
+            PM::Matrix covAcc(dimp1 - 1, dimp1 - 1);
 
-        if (accPenaltyFactor != 0) {
-            covAcc << 0.5 * accPenaltyFactor,   0,   0,
-                    0, 0.5 * accPenaltyFactor,   0,
-                    0,   0, 0.5 * accPenaltyFactor;
+            //IF COVARIANCE FOR THE GRAVITY PENALTY IS ENABLED
+            if (accPenaltyFactor != 0) {
+                covAcc << 0.5 * accPenaltyFactor, 0, 0,
+                        0, 0.5 * accPenaltyFactor, 0,
+                        0, 0, 0.5 * accPenaltyFactor;
+            } else {
+                covAcc = cov;
+            }
+            penaltyAcc = std::make_tuple(gravity_penalty_point_in_cutMap,
+                                                                     covAcc,
+                                                                     gravity_penalty_point_in_scanner);
+
         }
-        else {
-            covAcc = cov;
+
+        if(Yaw_penalty) {
+            ROS_INFO_STREAM("[MAP] Apply Yaw penalty");
+            // VK: This block creates the yaw penalty point   //YAW PENALTY
+            yaw_penalty_point_in_cutMap =
+                    T_localMap_to_map.inverse() * yaw_penalty_point_in_world; // Remove the tf between map and odom
+            if (GPS_penalty) {
+                yaw_penalty_point_in_scanner = T_gps_to_scanner * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
+            } else {
+                yaw_penalty_point_in_scanner = T_odom_to_scanner * yaw_penalty_point_in_world;
+            }
+
+            //cout << "yaw_penalty_point_in_cutMap: " << yaw_penalty_point_in_cutMap << endl;
+            //cout << "yaw_penalty_point_in_world: " << yaw_penalty_point_in_world << endl;
+            //cout << "yaw_penalty_point_in_scanner: " << yaw_penalty_point_in_scanner << endl;
+            //cout << "T_localMap_to_map: " << T_localMap_to_map << endl;
+            //cout << "T_gps_to_scanner: " << T_gps_to_scanner << endl;
+
+            penaltyYaw = std::make_tuple(yaw_penalty_point_in_cutMap,
+                                                                     cov,
+                                                                     yaw_penalty_point_in_scanner);
+
         }
-        PM::ErrorMinimizer::Penalty penaltyAcc = std::make_tuple(gravity_penalty_point_in_cutMap,
-                                                                 covAcc,
-                                                                 gravity_penalty_point_in_scanner);
-
-
-
-        // VK: This block creates the yaw penalty point
-        PM::Matrix yaw_penalty_point_in_cutMap = T_localMap_to_map.inverse() * yaw_penalty_point_in_world; // Remove the tf between map and odom
-        PM::Matrix yaw_penalty_point_in_scanner = T_odom_to_scanner * yaw_penalty_point_in_world;
-        PM::ErrorMinimizer::Penalty penaltyYaw = std::make_tuple(yaw_penalty_point_in_cutMap,
-                                                                 cov,
-                                                                 yaw_penalty_point_in_scanner);   // TODO: !!! FROM HERE AS WELL
-
-
-
         // VK: This block puts the tree penalties together for the ICP
         //PM::ErrorMinimizer::Penalties penalties = {penaltyGPS, penaltyAcc, penaltyYaw}; // BUG!!
-        PM::ErrorMinimizer::Penalties penalties = {penaltyGPS};
+        //PM::ErrorMinimizer::Penalties penalties = {penaltyGPS};
+        //if (grav_penalty_length != 0) {
+        //    penalties.push_back(penaltyAcc);
+        //}
+        //if (rotPenaltyLength != 0) {
+        //    penalties.push_back(penaltyYaw);
+        //}
 
-        if (grav_penalty_length != 0) {
+        ROS_INFO_STREAM("[MAP] Apply penalty selected");
+        PM::ErrorMinimizer::Penalties penalties = {};
+        if(GPS_penalty)
+        {
+            penalties.push_back(penaltyGPS);
+        }
+        if(Gravity_penalty)
+        {
             penalties.push_back(penaltyAcc);
         }
-        if (rotPenaltyLength != 0) {
+        if(Yaw_penalty)
+        {
             penalties.push_back(penaltyYaw);
         }
-
-
-
+        ROS_INFO_STREAM("[MAP] Penalty selected");
+        /*******************************************************************/
 //        //TODO: VK: This piece of code disables penalties to test and develop gravity compensation
 //        PM::Matrix test_att(T_odom_to_scanner.inverse());
 //        test_att(3,3) = nan("");
@@ -716,7 +815,6 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 //        penalties.push_back(pure_gravity_penalty);
 //        //TODO: VK End of 4dof hack
 
-
 		icpMapLock.lock();
 		T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap, penalties);
         //T_updatedScanner_to_localMap = icp(*newPointCloud, T_scanner_to_localMap);
@@ -730,7 +828,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		
 		// Ensure minimum overlap between scans
 		const double estimatedOverlap = icp.errorMinimizer->getOverlap();
-		//ROS_INFO_STREAM("[ICP] Overlap: " << estimatedOverlap);
+		ROS_INFO_STREAM("[ICP] Overlap: " << estimatedOverlap);
 		if (estimatedOverlap < minOverlap)
 		{
 			ROS_ERROR_STREAM("[ICP] Estimated overlap too small, ignoring ICP correction!");
@@ -743,22 +841,6 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 		// Update old transform
 		T_odom_to_map = T_updatedScanner_to_map * T_odom_to_scanner;
-
-		PM::Matrix T_cor=T_updatedScanner_to_localMap.inverse()*T_scanner_to_localMap;
-		float Tranlation_correction=sqrt(T_cor(0,3)*T_cor(0,3)+T_cor(1,3)*T_cor(1,3)+T_cor(2,3)*T_cor(2,3));
-		float Rotation_correction= acos((T_cor(0,0)+T_cor(1,1)+T_cor(2,2)-1)/2);
-		ROS_INFO_STREAM("[ICP] Translation correction:" << Tranlation_correction);
-		ROS_INFO_STREAM("[ICP] Rotation correction:" << Rotation_correction);
-
-		char* tstr = new char[30];
-		char* rstr = new char[30];
-		sprintf(tstr, "%.5g", Tranlation_correction);
-		sprintf(rstr, "%.5g", Rotation_correction);
-
-		ofstream file;
-		file.open ("/home/maxime/correction.txt", std::ofstream::out | std::ofstream::app);
-  	file << tstr << ";" << rstr << "\n";
-  	file.close();
 		
 		// Publish tf
 		if(publishMapTf == true)
@@ -779,8 +861,10 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		
 		ROS_DEBUG_STREAM("[ICP] T_odom_to_map:\n" << T_odom_to_map);
 
+
+/*
         // Publish arrow markers to show what is going on with the penalty...
-        auto cpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_world, mapFrame, publishStamp);
+        auto cpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_gps_to_scanner, mapFrame, publishStamp);
         auto gpp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_world, mapFrame, publishStamp);
         auto ypp_in_world_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_world, mapFrame, publishStamp);
 
@@ -789,18 +873,26 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
                                        ypp_in_world_odom,
                                        0.0,
                                        1.0,
-                                       0.0);
-
+                                       0.0); // vert
+                */
+         /*
         auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_scanner, sensorFrame, publishStamp);
         auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
         auto ypp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_scanner, sensorFrame, publishStamp);
+        publishPenaltyMarkerInMapFrame(cpp_in_scanner_odom, gpp_in_scanner_odom, ypp_in_scanner_odom,1.0, 0.0,0.0); //rouge */
 
-        publishPenaltyMarkerInMapFrame(cpp_in_scanner_odom,
-                                       gpp_in_scanner_odom,
-                                       ypp_in_scanner_odom,
-                                       1.0,
-                                       0.0,
-                                       0.0);
+
+        if(Gravity_penalty)
+        {
+            auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_odom_to_scanner.inverse(), sensorFrame, publishStamp);
+            auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
+            publishOnePenaltyMarkerInMapFrame(cpp_in_scanner_odom, gpp_in_scanner_odom,1.0, 0.0,0.0); //rouge
+        }
+        /*
+        auto cpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_scanner, sensorFrame, publishStamp);
+        auto gpp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_scanner, sensorFrame, publishStamp);
+        auto ypp_in_scanner_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_scanner, sensorFrame, publishStamp);
+        publishPenaltyMarkerInMapFrame(cpp_in_scanner_odom, gpp_in_scanner_odom, ypp_in_scanner_odom,1.0, 0.0,0.0); //rouge
 
         auto cpp_in_cutMap_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(central_penalty_point_in_cutMap, mapFrame, publishStamp);
         auto gpp_in_cutMap_odom = PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_cutMap, mapFrame, publishStamp);
@@ -813,9 +905,8 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
                                           1.0,
                                           0.0,
                                           1,
-                                          2);
-
-
+                                          2);  //vert
+*/
         // Publish odometry
 		if (odomPub.getNumSubscribers())
 		{
@@ -826,7 +917,6 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		if (odomErrorPub.getNumSubscribers())
 			odomErrorPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_odom_to_map, mapFrame, stamp));
 
-		
 
 		// check if news points should be added to the map
 		if (
@@ -854,6 +944,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 			
 			bool stateLock = publishLock.try_lock();
 			if(stateLock) publishLock.unlock();
+
 			cerr << "publishLock.try_lock(): " << stateLock << endl;
 			
 			stateLock = icpMapLock.try_lock();
@@ -878,7 +969,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	int realTimeRatio = 100*t.elapsed() / (stamp.toSec()-lastPoinCloudTime.toSec());
 	realTimeRatio *= seq - lastPointCloudSeq;
 
-	//ROS_INFO_STREAM("[TIME] Total ICP took: " << t.elapsed() << " [s]");
+	ROS_INFO_STREAM("[TIME] Total ICP took: " << t.elapsed() << " [s]");
 	if(realTimeRatio < 80)
 		ROS_INFO_STREAM("[TIME] Real-time capability: " << realTimeRatio << "%");
 	else
@@ -893,7 +984,7 @@ void Mapper::processNewMapIfAvailable()
 	#if BOOST_VERSION >= 104100
 	if (mapBuildingInProgress && mapBuildingFuture.has_value())
 	{
-		//ROS_INFO_STREAM("[MAP] Computation in thread done");
+		ROS_INFO_STREAM("[MAP] Computation in thread done");
 		setMap(mapBuildingFuture.get());
 		mapBuildingInProgress = false;
 	}
@@ -918,7 +1009,7 @@ void Mapper::setMap(DP* newMapPointCloud)
 	publishLock.lock();
 	if (mapPub.getNumSubscribers() && mapping)
 	{
-		//ROS_INFO_STREAM("[MAP] publishing " << mapPointCloud->getNbPoints() << " points");
+		ROS_INFO_STREAM("[MAP] publishing " << mapPointCloud->getNbPoints() << " points");
 		mapPub.publish(PointMatcher_ros::pointMatcherCloudToRosMsg<float>(*mapPointCloud, mapFrame, mapCreationTime));
 	}
 	publishLock.unlock();
@@ -1000,7 +1091,7 @@ Mapper::DP* Mapper::updateMap(DP* newPointCloud, const PM::TransformationParamet
 
 		if (!mapExists) 
 		{
-			//ROS_INFO_STREAM( "[MAP] Initial map, only filtering points");
+			ROS_INFO_STREAM( "[MAP] Initial map, only filtering points");
 			*newPointCloud = transformation->compute(*newPointCloud, T_updatedScanner_to_map); 
 			mapPostFilters.apply(*newPointCloud);
 
@@ -1011,7 +1102,7 @@ Mapper::DP* Mapper::updateMap(DP* newPointCloud, const PM::TransformationParamet
 		// Early out if no map modification is wanted
 		if(!mapping)
 		{
-			//ROS_INFO_STREAM("[MAP] Skipping modification of the map");
+			ROS_INFO_STREAM("[MAP] Skipping modification of the map");
 			return mapPointCloud;
 		}
 		
@@ -1263,7 +1354,7 @@ Mapper::DP* Mapper::updateMap(DP* newPointCloud, const PM::TransformationParamet
 		abort();
 	}
 	
-	//ROS_INFO_STREAM("[TIME][MAP] New map available (" << newPointCloud->features.cols() << " pts), update took " << t.elapsed() << " [s]");
+	ROS_INFO_STREAM("[TIME][MAP] New map available (" << newPointCloud->features.cols() << " pts), update took " << t.elapsed() << " [s]");
 	
 	return newPointCloud;
 }
@@ -1334,7 +1425,7 @@ bool Mapper::saveMap(map_msgs::SaveMap::Request &req, map_msgs::SaveMap::Respons
 		return false;
 	}
 	
-	//ROS_INFO_STREAM("[MAP] saved at " <<  req.filename.data << " with " << mapPointCloud->features.cols() << " points.");
+	ROS_INFO_STREAM("[MAP] saved at " <<  req.filename.data << " with " << mapPointCloud->features.cols() << " points.");
 	return true;
 }
 
@@ -1347,12 +1438,12 @@ bool Mapper::loadMap(ethzasl_icp_mapper::LoadMap::Request &req, ethzasl_icp_mapp
 	// Print new map information
 	const int dim = cloud->features.rows();
 	const int nbPts = cloud->features.cols();
-	//ROS_INFO_STREAM("[MAP] Loading " << dim-1 << "D point cloud (" << req.filename.data << ") with " << nbPts << " points.");
+	ROS_INFO_STREAM("[MAP] Loading " << dim-1 << "D point cloud (" << req.filename.data << ") with " << nbPts << " points.");
 
-	//ROS_INFO_STREAM("  With descriptors:");
+	ROS_INFO_STREAM("  With descriptors:");
 	for(int i=0; i< cloud->descriptorLabels.size(); i++)
 	{
-		//ROS_INFO_STREAM("    - " << cloud->descriptorLabels[i].text); 
+		ROS_INFO_STREAM("    - " << cloud->descriptorLabels[i].text); 
 	}
 
 	//reset transformation
@@ -1508,7 +1599,7 @@ bool Mapper::getBoundedMap(ethzasl_icp_mapper::GetBoundedMap::Request &req, ethz
 		}
 	}
 
-	//ROS_INFO_STREAM("Extract " << newPtCount << " points from the map");
+	ROS_INFO_STREAM("Extract " << newPtCount << " points from the map");
 	
 	cutPointCloud.conservativeResize(newPtCount);
 	cutPointCloud = transformation->compute(cutPointCloud, T.inverse()); 
@@ -1539,7 +1630,7 @@ void Mapper::loadExternalParameters()
 	}
 	else
 	{
-		//ROS_INFO_STREAM("No ICP config file given, using default");
+		ROS_INFO_STREAM("No ICP config file given, using default");
 		icp.setDefault();
 	}
 	
@@ -1557,7 +1648,7 @@ void Mapper::loadExternalParameters()
 	}
 	else
 	{
-		//ROS_INFO_STREAM("No input filters config file given, not using these filters");
+		ROS_INFO_STREAM("No input filters config file given, not using these filters");
 	}
 	
 	if (ros::param::get("~mapPreFiltersConfig", configFileName))
@@ -1574,7 +1665,7 @@ void Mapper::loadExternalParameters()
 	}
 	else
 	{
-		//ROS_INFO_STREAM("No map pre-filters config file given, not using these filters");
+		ROS_INFO_STREAM("No map pre-filters config file given, not using these filters");
 	}
 	
 	if (ros::param::get("~mapPostFiltersConfig", configFileName))
@@ -1591,79 +1682,66 @@ void Mapper::loadExternalParameters()
 	}
 	else
 	{
-		//ROS_INFO_STREAM("No map post-filters config file given, not using these filters");
-	}
-
-	if (ros::param::get("~inputFiltersWorldConfig", configFileName))
-	{
-		ifstream ifs(configFileName.c_str());
-		if (ifs.good())
-		{
-			inputFiltersWorld = PM::DataPointsFilters(ifs);
-		}
-		else
-		{
-			ROS_ERROR_STREAM("Cannot load map post-filters config from YAML file " << configFileName);
-		}
-	}
-	else
-	{
-		//ROS_INFO_STREAM("No map post-filters config file given, not using these filters");
+		ROS_INFO_STREAM("No map post-filters config file given, not using these filters");
 	}
 }
 
 bool Mapper::reloadallYaml(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res)
 {
 	loadExternalParameters();	
-	//ROS_INFO_STREAM("Parameters reloaded");
+	ROS_INFO_STREAM("Parameters reloaded");
 
 	return true;
 }
 
-/*bool Mapper::RestartMap(ethzasl_icp_mapper::RestartMap::Request &req, ethzasl_icp_mapper::RestartMap::Response &res)
+void Mapper::publishOnePenaltyMarkerInMapFrame(nav_msgs::Odometry& location,
+                                               nav_msgs::Odometry& gravity,
+                                            float red,
+                                            float green,
+                                            float blue)
 {
 
-	try
-	{
-		mapPointCloud->save(req.filename.data);
-	}
-	catch (const std::runtime_error& e)
-	{
-		ROS_ERROR_STREAM("Unable to save: " << e.what());
-		return false;
-	}
+    geometry_msgs::Point location_point;
+    location_point.x = location.pose.pose.position.x;
+    location_point.y = location.pose.pose.position.y;
+    location_point.z = location.pose.pose.position.z;
 
-	waitForMapBuildingCompleted();
-	
-	DP* cloud(new DP(DP::load(req.filename.data)));
+    geometry_msgs::Point gravity_point;
+    gravity_point.x = gravity.pose.pose.position.x;
+    gravity_point.y = gravity.pose.pose.position.y;
+    gravity_point.z = gravity.pose.pose.position.z;
 
-	// Print new map information
-	const int dim = cloud->features.rows();
-	const int nbPts = cloud->features.cols();
-	ROS_INFO_STREAM("[MAP] Loading " << dim-1 << "D point cloud (" << req.filename.data << ") with " << nbPts << " points.");
+    // Arrow for gravity penalty
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = location.header.frame_id;
+    marker.header.stamp = location.header.stamp;
+    marker.ns = "penalty_namespace";
+    marker.id = marker_id_counter;
+    marker_id_counter++;
 
-	ROS_INFO_STREAM("  With descriptors:");
-	for(int i=0; i< cloud->descriptorLabels.size(); i++)
-	{
-		ROS_INFO_STREAM("    - " << cloud->descriptorLabels[i].text); 
-	}
+    marker.type = visualization_msgs::Marker::ARROW;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.position.x = location_point.x;
+    marker.pose.position.y = location_point.y;
+    marker.pose.position.z = location_point.z;
+    marker.pose.orientation.x = 0.0;
+    marker.pose.orientation.y = 0.0;
+    marker.pose.orientation.z = 0.0;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.05;
+    marker.scale.y = 0.15;
+    marker.scale.z = 0.0;
+    marker.color.a = 1.0; // Don't forget to set the alpha!
+    marker.color.r = red;
+    marker.color.g = green;
+    marker.color.b = blue;
 
-	//reset transformation
-	publishLock.lock();
-	T_odom_to_map = PM::TransformationParameters::Identity(dim,dim);
-	T_localMap_to_map = PM::TransformationParameters::Identity(dim,dim);
-	T_odom_to_scanner = PointMatcher_ros::eigenMatrixToDim<float>(PointMatcher_ros::transformListenerToEigenMatrix<float>(tfListener, sensorFrame, odomFrame, ros::Time::now()), dim);
-	
-	//ISER
-	publishLock.unlock();
+    marker.points.push_back(location_point);
+    marker.points.push_back(gravity_point);
 
-	//TODO: check that...
-	mapping = true;
-	setMap(updateMap(cloud, T_scanner_to_map, false));
-	mapping = false;
-	
-	return true;
-}*/
+    penaltyVisMarkerPub.publish(marker);
+}
+
 
 
 void Mapper::publishPenaltyMarkerInMapFrame(nav_msgs::Odometry& location,
