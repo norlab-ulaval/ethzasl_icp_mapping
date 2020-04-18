@@ -18,29 +18,29 @@
 
 	  <!-- Parameters for Penalty -->
 	  <param name="GPS_penalty" value="true"/>
-	  <param name="penaltyFactor" value="10"/>
+	  <param name="penaltyFactor" value="5"/>
 
     <param name="Gravity_penalty" value="true"/>
     <param name="grav_penalty_length" value="100"/>
     <param name="accPenaltyFactor" value="10"/>
 
-    <param name="Yaw_penalty" value="false"/>
-    <param name="rotPenaltyLength" value="80"/>
+    <param name="Yaw_penalty" value="true"/>
+    <param name="rotPenaltyLength" value="1"/>
 
     <param name="Scanner_frame" value="/rslidar32"/>
     <param name="Baselink_frame" value="/base_link"/>
 
     <!-- Parameters for dynamic elements -->
-		<param name="priorStatic" value="0.45"/>
-		<param name="priorDyn" value="0.55"/>
+		<param name="priorStatic" value="0.7"/>
+		<param name="priorDyn" value="0.3"/>
 		<param name="maxAngle" value="0.1"/>
 		<param name="eps_a" value="0.020"/><!--1 deg = 0.017rad-->
 		<param name="eps_d" value="0.1"/>
 		<param name="alpha" value="0.99"/>
 		<param name="beta" value="0.90"/>
-		<param name="maxDyn" value="0.90"/>
-		<param name="maxDistNewPoint" value="0.5"/>
-		<param name="sensorMaxRange" value="40.0"/>
+		<param name="maxDyn" value="0.5"/>
+		<param name="maxDistNewPoint" value="0.1"/>
+		<param name="sensorMaxRange" value="100.0"/>
 
 
 	</node>

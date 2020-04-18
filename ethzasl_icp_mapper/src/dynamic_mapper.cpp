@@ -590,9 +590,9 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		return;
 	}
 
+    //GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(T_odom_to_map, mapFrame, stamp));
 
-
-	try
+    try
 	{
         ROS_INFO_STREAM("[MAP] Compute penalty");
         /*********************************************************************/
@@ -640,15 +640,17 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
             gravity_penalty_point_in_world = PM::TransformationParameters::Identity(dimp1, dimp1);
             if (GPS_penalty || Yaw_penalty) {
                 gravity_penalty_point_in_world = tmp * T_gps_to_scanner;  //IF GPS PENALTY ENABLED
+                //gravity_penalty_point_in_world(0, 3) = T_gps_to_scanner(0,3);
+                //gravity_penalty_point_in_world(1, 3) = T_gps_to_scanner(1,3);
             } else {
-                gravity_penalty_point_in_world = (tmp * (T_odom_to_scanner));
+                gravity_penalty_point_in_world = tmp * T_odom_to_scanner.inverse();
                 /*gravity_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1)=T_odom_to_scanner.block(0, 0, dimp1 - 1, dimp1 - 1);
                 gravity_penalty_point_in_world(0,3)=T_odom_to_scanner(0,3);
                 gravity_penalty_point_in_world(1,3)=T_odom_to_scanner(0,3);
                 gravity_penalty_point_in_world(2,3)=-grav_penalty_length;*/
             }
 
-            GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_world, sensorFrame, stamp));
+            GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(gravity_penalty_point_in_world, mapFrame, stamp));
         }
 
         if(Yaw_penalty) {
@@ -675,20 +677,20 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
             rotation_from_scanner_to_gps.block(0, 0, dimp1 - 1, dimp1 - 1) = T_scanner_to_baselink_stabilized;
 
             //then compute the tf of the yaw penalty with or without the GPS penalty
-            if (GPS_penalty) {
+            //if (GPS_penalty) {
                 yaw_penalty_point_in_world =
-                        T_gps_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;  //IF GPS PENALTY ENABLED
+                        tmp * T_gps_to_scanner * rotation_from_scanner_to_gps;  //IF GPS PENALTY ENABLED
                 yaw_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1) = PM::TransformationParameters::Identity(
                         dimp1 - 1, dimp1 - 1);
                 // The next line simply projects the point to the xy world plane by setting the z coordinate equal to the z component of the central point
-                yaw_penalty_point_in_world(2, 3) = T_gps_to_scanner(2, 3);
-            } else {
+                //yaw_penalty_point_in_world(2, 3) = T_gps_to_scanner(2, 3);
+            /*} else {
                 yaw_penalty_point_in_world = T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;
                 yaw_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1) = PM::TransformationParameters::Identity(
                         dimp1 - 1, dimp1 - 1);
                 // The next line simply projects the point to the xy world plane by setting the z coordinate equal to the z component of the central point
                 yaw_penalty_point_in_world(2, 3) = T_odom_to_scanner(2, 3);
-            }
+            }*/
         }
 
 
@@ -732,7 +734,7 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
                     T_localMap_to_map.inverse() * gravity_penalty_point_in_world; // Remove the tf between map and odom
             if (GPS_penalty || Yaw_penalty) {
                 gravity_penalty_point_in_scanner =
-                        T_gps_to_scanner * gravity_penalty_point_in_world;  //IF GPS PENALTY ENABLED
+                        T_gps_to_scanner.inverse() * gravity_penalty_point_in_world;  //IF GPS PENALTY ENABLED
             } else {
                 gravity_penalty_point_in_scanner = T_odom_to_scanner * gravity_penalty_point_in_world;
             }
@@ -758,11 +760,11 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
             // VK: This block creates the yaw penalty point   //YAW PENALTY
             yaw_penalty_point_in_cutMap =
                     T_localMap_to_map.inverse() * yaw_penalty_point_in_world; // Remove the tf between map and odom
-            if (GPS_penalty) {
-                yaw_penalty_point_in_scanner = T_gps_to_scanner * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
-            } else {
+            //if (GPS_penalty) {
+                yaw_penalty_point_in_scanner = (T_gps_to_scanner * rotation_from_scanner_to_gps).inverse() * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
+            /*} else {
                 yaw_penalty_point_in_scanner = T_odom_to_scanner * yaw_penalty_point_in_world;
-            }
+            }*/
 
             //cout << "yaw_penalty_point_in_cutMap: " << yaw_penalty_point_in_cutMap << endl;
             //cout << "yaw_penalty_point_in_world: " << yaw_penalty_point_in_world << endl;

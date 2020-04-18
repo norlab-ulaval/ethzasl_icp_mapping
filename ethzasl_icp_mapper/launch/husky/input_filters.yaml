@@ -1,30 +1,17 @@
-# - BoundingBoxDataPointsFilter:
-#     xMin: -5.0
-#     xMax: 0.0
-#     yMin: -0.3
-#     yMax: 1.3
-#     zMin: -0.5
-#     zMax: 2.0
-#     removeInside: 1
+- VoxelGridDataPointsFilter:
+    vSizeX: 0.25
+    vSizeY: 0.25
+    vSizeZ: 0.25
+
+- SimpleSensorNoiseDataPointsFilter
 
 - SurfaceNormalDataPointsFilter:
-    knn: 15
-    epsilon: 1.33
+    knn: 20
     keepNormals: 1
     keepDensities: 1
 
-- MaxDensityDataPointsFilter:
-    maxDensity: 100.0
+#- MaxDensityDataPointsFilter:
+#    maxDensity: 50000
 
-- SimpleSensorNoiseDataPointsFilter:
-    sensorType: 0
-
-# - ObservationDirectionDataPointsFilter:
-
-# - OrientNormalsDataPointsFilter
-
-# - IncidenceAngleDataPointsFilter:
-
-# - RemoveSensorBiasDataPointsFilter:
-#     sensorType: 0
-#     angleThreshold: 88.0
+- ObservationDirectionDataPointsFilter
+- OrientNormalsDataPointsFilter 
