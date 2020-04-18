@@ -17,7 +17,7 @@
 		<param name="mapping" value="true" />
 
 	  <!-- Parameters for Penalty -->
-	  <param name="GPS_penalty" value="true"/>
+	  <param name="GPS_penalty" value="false"/>
 	  <param name="penaltyFactor" value="5"/>
 
     <param name="Gravity_penalty" value="true"/>
@@ -25,7 +25,8 @@
     <param name="accPenaltyFactor" value="10"/>
 
     <param name="Yaw_penalty" value="true"/>
-    <param name="rotPenaltyLength" value="1"/>
+    <param name="rotPenaltyLength" value="100"/>
+    <param name="yawPenaltyFactor" value="10"/>
 
     <param name="Scanner_frame" value="/rslidar32"/>
     <param name="Baselink_frame" value="/base_link"/>
