@@ -686,8 +686,8 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
             //then compute the tf of the yaw penalty with or without the GPS penalty
             if (GPS_penalty) {
-                //yaw_penalty_point_in_world = T_gps_to_scanner * T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;  //IF GPS PENALTY ENABLED
-                yaw_penalty_point_in_world = T_gps_to_scanner * rotation_from_scanner_to_gps * tmp;
+                yaw_penalty_point_in_world = T_gps_to_scanner * T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps * tmp;  //IF GPS PENALTY ENABLED
+                //yaw_penalty_point_in_world = T_gps_to_scanner * rotation_from_scanner_to_gps * tmp;
                 yaw_penalty_point_in_world.block(0, 0, dimp1 - 1, dimp1 - 1) = PM::TransformationParameters::Identity(dimp1 - 1, dimp1 - 1);
 
                 GPSPub.publish(PointMatcher_ros::eigenMatrixToOdomMsg<float>(yaw_penalty_point_in_world, mapFrame, stamp));
@@ -771,8 +771,8 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
             yaw_penalty_point_in_cutMap =
                     T_localMap_to_map.inverse() * yaw_penalty_point_in_world; // Remove the tf between map and odom
             if (GPS_penalty) {
-                //yaw_penalty_point_in_scanner = (T_gps_to_scanner * T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps).inverse() * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
-                yaw_penalty_point_in_scanner = (T_gps_to_scanner * rotation_from_scanner_to_gps).inverse() * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
+                yaw_penalty_point_in_scanner = (T_gps_to_scanner * T_odom_to_scanner.inverse() * rotation_from_scanner_to_gps).inverse() * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
+                //yaw_penalty_point_in_scanner = (T_gps_to_scanner * rotation_from_scanner_to_gps).inverse() * yaw_penalty_point_in_world;   //IF GPS PENALTY ENABLED
             } else {
                 yaw_penalty_point_in_scanner = T_odom_to_scanner * yaw_penalty_point_in_world;
             }
