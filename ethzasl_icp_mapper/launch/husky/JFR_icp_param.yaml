@@ -21,7 +21,9 @@ outlierFilters:
 #    ratio: 0.7
 
 errorMinimizer:
-#  PointToPlaneErrorMinimizer
+  PointToPlaneErrorMinimizer:
+        LiePenalty: 1
+        priorCovariance: 10
 #        force2D: 0
 #        force4DOF: 0
 #        forceXYZOnly: 0
@@ -29,8 +31,8 @@ errorMinimizer:
 #  PointToPlaneWithPenaltiesErrorMinimizer
 #        force2D: 0
 #        force4DOF: 
-  PointToGaussianErrorMinimizer:
-        noiseSensor: 0.1
+#  PointToGaussianErrorMinimizer:
+#        noiseSensor: 0.1
 #        force2D: 0
 #        force4DOF: 0
 
