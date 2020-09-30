@@ -19,6 +19,7 @@
 #include "pointmatcher_ros/ros_logger.h"
 
 #include "nav_msgs/Odometry.h"
+#include "diagnostic_msgs/DiagnosticArray.h"
 #include "tf/transform_broadcaster.h"
 #include "tf_conversions/tf_eigen.h"
 #include "tf/transform_listener.h"
@@ -62,6 +63,7 @@ class Mapper
 	ros::Publisher outlierPub;
 	ros::Publisher odomPub;
 	ros::Publisher odomErrorPub;
+	ros::Publisher diagPub;
 	
 	// Services
 	ros::ServiceServer getPointMapSrv;
@@ -251,6 +253,7 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	outlierPub = n.advertise<sensor_msgs::PointCloud2>("outliers", 2, true);
 	odomPub = n.advertise<nav_msgs::Odometry>("icp_odom", 50, true);
 	odomErrorPub = n.advertise<nav_msgs::Odometry>("icp_error_odom", 50, true);
+	diagPub = n.advertise<diagnostic_msgs::DiagnosticArray>("icp_diagnostics", 2, true);
 	
 	// service initializations
 	getPointMapSrv = n.advertiseService("dynamic_point_map", &Mapper::getPointMap, this);
@@ -351,7 +354,17 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 	processingNewCloud = true;
 	BoolSetter stopProcessingSetter(processingNewCloud, false);
-	
+
+	// diagnostic message preparation
+	diagnostic_msgs::DiagnosticArray diag_msg;
+	diag_msg.header.stamp = stamp;
+	diagnostic_msgs::DiagnosticStatus status_msg;
+	status_msg.hardware_id = "N/A";
+	status_msg.level = diagnostic_msgs::DiagnosticStatus::OK;
+	status_msg.message = "ICP convergence OK.";
+	status_msg.name = "ICP mapper status";
+	diag_msg.status.push_back(status_msg);
+
 	// If the sensor frame was not set by the user, use default
 	if(sensorFrame == "")
 	{
@@ -371,6 +384,11 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	if (goodCount == 0)
 	{
 		ROS_ERROR("[ICP] I found no good points in the cloud");
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = "No good points in the cloud";
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 	
@@ -397,23 +415,42 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 	// Ensure a minimum amount of point before filtering
 	int ptsCount = newPointCloud->getNbPoints();
+
+	//diag
+	diagnostic_msgs::KeyValue input_pts_count_value;
+	input_pts_count_value.key = "Input points before filtering";
+	input_pts_count_value.value = std::to_string(ptsCount);
+	diag_msg.status[0].values.push_back(input_pts_count_value);
+
 	if(ptsCount < minReadingPointCount)
 	{
 		ROS_ERROR_STREAM("[ICP] Not enough points in newPointCloud: only " << ptsCount << " pts.");
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = "Not enough input points before filtering.";
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 
 
 	{
 		timer t; // Print how long take the algo
-		
+
 		// Apply filters to incoming cloud, in scanner coordinates
 		inputFilters.apply(*newPointCloud);
-		
-		ROS_INFO_STREAM("Time difference between point cloud and tf " << ros::Time::now() - stamp << endl);
+
+		double elapsed_secs = t.elapsed();
+
+		//ROS_INFO_STREAM("Time difference between point cloud and tf " << ros::Time::now() - stamp << endl);
+		ROS_INFO_STREAM("[ICP] Input filters took " << elapsed_secs << " [s]");
+
+		diagnostic_msgs::KeyValue input_filters_time;
+		input_filters_time.key = "Input filters duration [s]";
+		input_filters_time.value = std::to_string(elapsed_secs);
+		diag_msg.status[0].values.push_back(input_filters_time);
 	}
 
-  ROS_INFO_STREAM("[ICP] Input filters took " << t.elapsed() << " [s]");
 	string reason;
 	// Initialize the transformation to the desired value or leave identity from the constructor
  	if(!icp.hasMap())
@@ -466,6 +503,18 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 	// Fetch transformation from scanner to odom
 	// Note: we don't need to actively wait for transform here. It is already waited in transformListenerToEigenMatrix()
+
+	//Diag. timestamps
+	diagnostic_msgs::KeyValue now_value;
+	now_value.key = "ROS time now (approx.)";
+	now_value.value = std::to_string(ros::Time::now().toSec());
+	diagnostic_msgs::KeyValue stamp_value;
+	stamp_value.key = "Msg. stamp";
+	stamp_value.value = std::to_string(stamp.toSec());
+	diag_msg.status[0].values.push_back(now_value);
+	diag_msg.status[0].values.push_back(stamp_value);
+
+    //Fetch:
 	try
 	{
 		T_odom_to_scanner = PointMatcher_ros::eigenMatrixToDim<float>(
@@ -479,12 +528,22 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	catch(tf::ExtrapolationException e)
 	{
 		ROS_ERROR_STREAM("Extrapolation Exception. stamp = "<< stamp << " now = " << ros::Time::now() << " delta = " << ros::Time::now() - stamp << endl << e.what() );
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = std::string("TF Extrapolation Exception: ") + std::string(e.what());
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 	catch ( ... )
 	{
 		// everything else
 		ROS_ERROR_STREAM("Unexpected exception... ignoring scan");
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = "Unexpected TF exception.";
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 
@@ -499,9 +558,21 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 	// Ensure a minimum amount of point after filtering
 	ptsCount = newPointCloud->getNbPoints();
+
+	//diag
+	diagnostic_msgs::KeyValue filtered_pts_count_value;
+	filtered_pts_count_value.key = "Input points after filtering";
+	filtered_pts_count_value.value = std::to_string(ptsCount);
+	diag_msg.status[0].values.push_back(filtered_pts_count_value);
+
 	if(ptsCount < minReadingPointCount)
 	{
 		ROS_ERROR_STREAM("[ICP] Not enough points in newPointCloud: only " << ptsCount << " pts.");
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = "Not enough input points after filtering.";
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 
@@ -519,6 +590,11 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	if (newPointCloud->getEuclideanDim() != icp.getPrefilteredInternalMap().getEuclideanDim())
 	{
 		ROS_ERROR_STREAM("[ICP] Dimensionality missmatch: incoming cloud is " << newPointCloud->getEuclideanDim() << " while map is " << icp.getPrefilteredInternalMap().getEuclideanDim());
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = "Dimensions mismatch between input cloud and map.";
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 	
@@ -530,7 +606,11 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		
 		ROS_INFO_STREAM("[ICP] Computing - reading: " << newPointCloud->getNbPoints() << ", reference: " << icp.getInternalMap().getNbPoints() );
 
-
+		//diag
+		diagnostic_msgs::KeyValue map_pts_count_value;
+		map_pts_count_value.key = "Reference points";
+		map_pts_count_value.value = std::to_string(icp.getInternalMap().getNbPoints());
+		diag_msg.status[0].values.push_back(map_pts_count_value);
 
         //TODO: VK: This piece of code disables penalties to test and develop gravity compensation
         //PM::Matrix test_att(T_odom_to_scanner.inverse());
@@ -561,9 +641,21 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		// Ensure minimum overlap between scans
 		const double estimatedOverlap = icp.errorMinimizer->getOverlap();
 		ROS_INFO_STREAM("[ICP] Overlap: " << estimatedOverlap);
+
+		//diag
+		diagnostic_msgs::KeyValue overlap_value;
+		overlap_value.key = "Estimated overlap";
+		overlap_value.value = std::to_string(estimatedOverlap);
+		diag_msg.status[0].values.push_back(overlap_value);
+
 		if (estimatedOverlap < minOverlap)
 		{
 			ROS_ERROR_STREAM("[ICP] Estimated overlap too small, ignoring ICP correction!");
+
+			diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+			diag_msg.status[0].message = "Estimated overlap too small, ignoring ICP correction.";
+			diagPub.publish(diag_msg);
+
 			return;
 		}
 		
@@ -648,11 +740,17 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 		ROS_ERROR_STREAM("[ICP] failed to converge: " << error.what());
 		//newPointCloud->save("error_read.vtk");
 		//icp.getPrefilteredMap().save("error_ref.vtk");
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = std::string("ICP failed to converge: ") + std::string(error.what());
+		diagPub.publish(diag_msg);
+
 		return;
 	}
 	
 	//Statistics about time and real-time capability
-	int realTimeRatio = 100*t.elapsed() / (stamp.toSec()-lastPoinCloudTime.toSec());
+	double total_processing_time = t.elapsed();
+	int realTimeRatio = 100*total_processing_time / (stamp.toSec()-lastPoinCloudTime.toSec());
 	realTimeRatio *= seq - lastPointCloudSeq;
 
 	ROS_INFO_STREAM("[TIME] Total ICP took: " << t.elapsed() << " [s]");
@@ -661,6 +759,17 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 	else
 		ROS_WARN_STREAM("[TIME] Real-time capability: " << realTimeRatio << "%");
 
+	//diag
+	diagnostic_msgs::KeyValue process_time_value;
+	process_time_value.key = "Processing time";
+	process_time_value.value = std::to_string(total_processing_time);
+	diag_msg.status[0].values.push_back(process_time_value);
+	diagnostic_msgs::KeyValue realtime_ratio_value;
+	realtime_ratio_value.key = "Real-time capability %";
+	realtime_ratio_value.value = std::to_string(realTimeRatio);
+	diag_msg.status[0].values.push_back(realtime_ratio_value);
+
+	diagPub.publish(diag_msg);
 	lastPoinCloudTime = stamp;
 	lastPointCloudSeq = seq;
 }

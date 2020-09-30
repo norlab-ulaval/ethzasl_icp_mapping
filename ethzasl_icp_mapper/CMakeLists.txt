@@ -15,6 +15,7 @@ message_filters
 map_msgs 
 libpointmatcher_ros 
 visualization_msgs
+diagnostic_msgs
 interactive_markers 
 ethzasl_gridmap_2d 
 message_generation 
