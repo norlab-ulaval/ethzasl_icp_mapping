@@ -243,11 +243,6 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	radiusFilter = PM::get().DataPointsFilterRegistrar.create("MaxDistDataPointsFilter", params);
 
 	// topic initializations
-	if (getParam<bool>("subscribe_scan", true))
-		scanSub = n.subscribe("scan", inputQueueSize, &Mapper::gotScan, this);
-	if (getParam<bool>("subscribe_cloud", true))
-		cloudSub = n.subscribe("cloud_in", inputQueueSize, &Mapper::gotCloud, this);
-
 	mapPub = n.advertise<sensor_msgs::PointCloud2>("point_map", 2, true);
 	scanPub = n.advertise<sensor_msgs::PointCloud2>("corrected_scan", 2, true);
 	outlierPub = n.advertise<sensor_msgs::PointCloud2>("outliers", 2, true);
@@ -265,6 +260,11 @@ Mapper::Mapper(ros::NodeHandle& n, ros::NodeHandle& pn):
 	getModeSrv = pn.advertiseService("get_mode", &Mapper::getMode, this);
 	getBoundedMapSrv = pn.advertiseService("get_bounded_map", &Mapper::getBoundedMap, this);
 	reloadAllYamlSrv= pn.advertiseService("reload_all_yaml", &Mapper::reloadallYaml, this);
+
+	if (getParam<bool>("subscribe_scan", true))
+		scanSub = n.subscribe("scan", inputQueueSize, &Mapper::gotScan, this);
+	if (getParam<bool>("subscribe_cloud", true))
+		cloudSub = n.subscribe("cloud_in", inputQueueSize, &Mapper::gotCloud, this);
 
 	// refreshing tf transform thread
 	publishThread = boost::thread(boost::bind(&Mapper::publishLoop, this, tfRefreshPeriod));
@@ -1180,7 +1180,7 @@ void Mapper::publishLoop(double publishPeriod)
 
 void Mapper::publishTransform()
 {
-	if(processingNewCloud == false && publishMapTf == true)
+	if(processingNewCloud == false && publishMapTf == true && !lastPoinCloudTime.isZero())
 	{
 		publishLock.lock();
     ros::Time stamp = ros::Time::now();
