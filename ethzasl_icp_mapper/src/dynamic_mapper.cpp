@@ -535,6 +535,16 @@ void Mapper::processCloud(unique_ptr<DP> newPointCloud, const std::string& scann
 
 		return;
 	}
+	catch(tf::TransformException e)
+	{
+		ROS_ERROR_STREAM("Other TF Exception. stamp = "<< stamp << " now = " << ros::Time::now() << " delta = " << ros::Time::now() - stamp << endl << e.what() );
+
+		diag_msg.status[0].level = diagnostic_msgs::DiagnosticStatus::ERROR;
+		diag_msg.status[0].message = std::string("Other TF Exception: ") + std::string(e.what());
+		diagPub.publish(diag_msg);
+
+		return;
+	}
 	catch ( ... )
 	{
 		// everything else
